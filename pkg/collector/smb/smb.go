@@ -18,8 +18,8 @@ import (
 
 const (
 	Name                     = "smb"
-	FlagSmbListAllCollectors = "collectors.smb.list"
-	FlagSmbCollectorsEnabled = "collectors.smb.enabled"
+	FlagSmbListAllCollectors = "collector.smb.list"
+	FlagSmbCollectorsEnabled = "collector.smb.enabled"
 )
 
 type Config struct {
