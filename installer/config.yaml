@@ -1,0 +1,7 @@
+#collectors:
+#  enabled: cpu,cs,net,service
+#collector:
+#  service:
+#    services-where: "Name='windows_exporter'"
+#log:
+#  level: warn

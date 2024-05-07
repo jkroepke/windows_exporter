@@ -12,6 +12,12 @@
     <Property Id="ENABLED_COLLECTORS" Secure="yes" />
     <SetProperty Id="CollectorsFlag" After="InstallFiles" Sequence="execute" Value="--collectors.enabled [ENABLED_COLLECTORS]" Condition="ENABLED_COLLECTORS" />
 
+    <Property Id="CONFIG_FILE" Secure="yes" Value="9182" />
+    <SetProperty Id="ConfigFileFlag" After="InstallFiles" Sequence="execute" Value="--config.file [CONFIG_FILE]" Condition="CONFIG_FILE" />
+
+    <Property Id="TEXTFILE_DIRS" Secure="yes" />
+    <SetProperty Id="TextfileDirsFlag" After="InstallFiles" Sequence="execute" Value="--collector.textfile.directories [TEXTFILE_DIRS]" Condition="TEXTFILE_DIRS" />
+
     <Property Id="EXTRA_FLAGS" Secure="yes" />
     <SetProperty Id="ExtraFlags" After="InstallFiles" Sequence="execute" Value="[EXTRA_FLAGS]" Condition="EXTRA_FLAGS" />
 
@@ -47,13 +53,11 @@
       <Custom Action="RemoveEventSource" After="InstallInitialize" />
     </InstallExecuteSequence>
 
-    <Property Id="TEXTFILE_DIRS" Secure="yes" />
-    <SetProperty Id="TextfileDirsFlag" After="InstallFiles" Sequence="execute" Value="--collector.textfile.directories [TEXTFILE_DIRS]" Condition="TEXTFILE_DIRS" />
-
     <ComponentGroup Id="Files">
       <Component Directory="APPLICATIONROOTDIRECTORY">
         <File Id="windows_exporter.exe" Name="windows_exporter.exe" Source="Work\windows_exporter.exe" KeyPath="yes" />
-        <ServiceInstall Id="InstallExporterService" Name="windows_exporter" DisplayName="windows_exporter" Description="Exports Prometheus metrics about the system" ErrorControl="normal" Start="auto" Type="ownProcess" Arguments="--log.file eventlog [CollectorsFlag] [ListenFlag] [MetricsPathFlag] [TextfileDirsFlag] [ExtraFlags]">
+        <File Id="config.yaml" Name="config.yaml" Source="config.yaml" KeyPath="yes" PatchIgnore=yes />
+        <ServiceInstall Id="InstallExporterService" Name="windows_exporter" DisplayName="windows_exporter" Description="Exports Prometheus metrics about the system" ErrorControl="normal" Start="auto" Type="ownProcess" Arguments="--log.file eventlog [ConfigFileFlag] [CollectorsFlag] [ListenFlag] [MetricsPathFlag] [TextfileDirsFlag] [ExtraFlags]">
           <util:ServiceConfig FirstFailureActionType="restart" SecondFailureActionType="restart" ThirdFailureActionType="restart" RestartServiceDelayInSeconds="60" />
           <ServiceDependency Id="wmiApSrv" />
         </ServiceInstall>
