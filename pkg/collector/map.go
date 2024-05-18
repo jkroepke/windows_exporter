@@ -54,6 +54,7 @@ import (
 	"github.com/prometheus-community/windows_exporter/pkg/collector/textfile"
 	"github.com/prometheus-community/windows_exporter/pkg/collector/thermalzone"
 	"github.com/prometheus-community/windows_exporter/pkg/collector/time"
+	"github.com/prometheus-community/windows_exporter/pkg/collector/updates"
 	"github.com/prometheus-community/windows_exporter/pkg/collector/vmware"
 	"github.com/prometheus-community/windows_exporter/pkg/collector/vmware_blast"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
@@ -115,6 +116,7 @@ var Map = map[string]types.CollectorBuilderWithFlags{
 	textfile.Name:                        textfile.NewWithFlags,
 	thermalzone.Name:                     thermalzone.NewWithFlags,
 	time.Name:                            time.NewWithFlags,
+	updates.Name:                         updates.NewWithFlags,
 	vmware.Name:                          vmware.NewWithFlags,
 	vmware_blast.Name:                    vmware_blast.NewWithFlags,
 }

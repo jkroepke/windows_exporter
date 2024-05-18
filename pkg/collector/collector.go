@@ -3,6 +3,7 @@
 package collector
 
 import (
+	"github.com/prometheus-community/windows_exporter/pkg/collector/updates"
 	"slices"
 	"strings"
 
@@ -140,6 +141,7 @@ func NewWithConfig(logger log.Logger, config Config) Collectors {
 	collectors[textfile.Name] = textfile.New(logger, &config.Textfile)
 	collectors[thermalzone.Name] = thermalzone.New(logger, &config.Thermalzone)
 	collectors[time.Name] = time.New(logger, &config.Time)
+	collectors[updates.Name] = updates.New(logger, &config.Updates)
 	collectors[vmware.Name] = vmware.New(logger, &config.Vmware)
 	collectors[vmware_blast.Name] = vmware_blast.New(logger, &config.VmwareBlast)
 	return New(collectors)
