@@ -30,6 +30,7 @@ import (
 	"github.com/dimchansky/utfbom"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -104,7 +105,7 @@ func (c *Collector) Close() error {
 	return nil
 }
 
-func (c *Collector) Build(logger log.Logger) error {
+func (c *Collector) Build(logger log.Logger, _ *cim.WmiSessionManager) error {
 	_ = level.Info(logger).
 		Log("msg", "textfile Collector directories: "+strings.Join(c.config.TextFileDirectories, ","), "collector", Name)
 

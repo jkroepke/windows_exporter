@@ -4,12 +4,15 @@ package teradici_pcoip
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/microsoft/wmi/pkg/constant"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
-	"github.com/prometheus-community/windows_exporter/pkg/wmi"
+	"github.com/prometheus-community/windows_exporter/pkg/wmihelper"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -27,6 +30,8 @@ var ConfigDefaults = Config{}
 // win32_PerfRawData_TeradiciPerf_PCoIPSessionUsbStatistics.
 type Collector struct {
 	config Config
+
+	wmiSession *cim.WmiSession
 
 	audioBytesReceived       *prometheus.Desc
 	audioBytesSent           *prometheus.Desc
@@ -96,10 +101,20 @@ func (c *Collector) GetPerfCounter(_ log.Logger) ([]string, error) {
 }
 
 func (c *Collector) Close() error {
+	if c.wmiSession != nil {
+		c.wmiSession.Dispose()
+	}
+
 	return nil
 }
 
-func (c *Collector) Build(logger log.Logger) error {
+func (c *Collector) Build(logger log.Logger, sessionManager *cim.WmiSessionManager) error {
+	var err error
+
+	if c.wmiSession, err = wmihelper.OpenSession(sessionManager, string(constant.CimV2)); err != nil {
+		return fmt.Errorf("failed to open WMI session: %w", err)
+	}
+
 	_ = level.Warn(logger).
 		Log("msg", "teradici_pcoip collector is deprecated and will be removed in the future.", "collector", Name)
 
@@ -413,8 +428,7 @@ type win32_PerfRawData_TeradiciPerf_PCoIPSessionUsbStatistics struct {
 
 func (c *Collector) collectAudio(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []win32_PerfRawData_TeradiciPerf_PCoIPSessionAudioStatistics
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "win32_PerfRawData_TeradiciPerf_PCoIPSessionAudioStatistics", &dst); err != nil {
 		return err
 	}
 	if len(dst) == 0 {
@@ -456,8 +470,7 @@ func (c *Collector) collectAudio(logger log.Logger, ch chan<- prometheus.Metric)
 
 func (c *Collector) collectGeneral(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []win32_PerfRawData_TeradiciPerf_PCoIPSessionGeneralStatistics
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "win32_PerfRawData_TeradiciPerf_PCoIPSessionGeneralStatistics", &dst); err != nil {
 		return err
 	}
 	if len(dst) == 0 {
@@ -511,8 +524,7 @@ func (c *Collector) collectGeneral(logger log.Logger, ch chan<- prometheus.Metri
 
 func (c *Collector) collectImaging(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []win32_PerfRawData_TeradiciPerf_PCoIPSessionImagingStatistics
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "win32_PerfRawData_TeradiciPerf_PCoIPSessionImagingStatistics", &dst); err != nil {
 		return err
 	}
 	if len(dst) == 0 {
@@ -590,8 +602,7 @@ func (c *Collector) collectImaging(logger log.Logger, ch chan<- prometheus.Metri
 
 func (c *Collector) collectNetwork(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []win32_PerfRawData_TeradiciPerf_PCoIPSessionNetworkStatistics
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "win32_PerfRawData_TeradiciPerf_PCoIPSessionNetworkStatistics", &dst); err != nil {
 		return err
 	}
 	if len(dst) == 0 {
@@ -663,8 +674,7 @@ func (c *Collector) collectNetwork(logger log.Logger, ch chan<- prometheus.Metri
 
 func (c *Collector) collectUsb(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []win32_PerfRawData_TeradiciPerf_PCoIPSessionUsbStatistics
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "win32_PerfRawData_TeradiciPerf_PCoIPSessionUsbStatistics", &dst); err != nil {
 		return err
 	}
 	if len(dst) == 0 {

@@ -10,8 +10,9 @@ import (
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
+	"github.com/microsoft/wmi/server2019/root/cimv2"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
-	"github.com/prometheus-community/windows_exporter/pkg/wmi"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -40,6 +41,8 @@ var ConfigDefaults = Config{
 
 type Collector struct {
 	config Config
+
+	wmiSession *cim.WmiSession
 
 	printerStatus    *prometheus.Desc
 	printerJobStatus *prometheus.Desc
@@ -103,10 +106,25 @@ func NewWithFlags(app *kingpin.Application) *Collector {
 }
 
 func (c *Collector) Close() error {
+	if c.wmiSession != nil {
+		c.wmiSession.Dispose()
+	}
+
 	return nil
 }
 
-func (c *Collector) Build(_ log.Logger) error {
+func (c *Collector) Build(_ log.Logger, sessionManager *cim.WmiSessionManager) error {
+	wmiSession, err := sessionManager.GetLocalSession("ROOT\\CimV2")
+	if err != nil {
+		return fmt.Errorf("failed to connect to WMI: %w", err)
+	}
+
+	connected, err := wmiSession.Connect()
+	if !connected || err != nil {
+		return fmt.Errorf("failed to connect to WMI: %w", err)
+	}
+
+	c.wmiSession = wmiSession
 	c.printerJobStatus = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "job_status"),
 		"A counter of printer jobs by status",
@@ -133,18 +151,6 @@ func (c *Collector) GetName() string { return Name }
 
 func (c *Collector) GetPerfCounter(_ log.Logger) ([]string, error) { return []string{"Printer"}, nil }
 
-type wmiPrinter struct {
-	Name                   string
-	Default                bool
-	PrinterStatus          uint16
-	JobCountSinceLastReset uint32
-}
-
-type wmiPrintJob struct {
-	Name   string
-	Status string
-}
-
 func (c *Collector) Collect(_ *types.ScrapeContext, logger log.Logger, ch chan<- prometheus.Metric) error {
 	logger = log.With(logger, "collector", Name)
 	if err := c.collectPrinterStatus(logger, ch); err != nil {
@@ -161,14 +167,25 @@ func (c *Collector) Collect(_ *types.ScrapeContext, logger log.Logger, ch chan<-
 }
 
 func (c *Collector) collectPrinterStatus(logger log.Logger, ch chan<- prometheus.Metric) error {
-	var printers []wmiPrinter
-
-	q := wmi.QueryAllForClass(&printers, "win32_Printer", logger)
-	if err := wmi.Query(q, &printers); err != nil {
-		return err
+	win32PrinterInstances, err := c.wmiSession.EnumerateInstances("Win32_Printer")
+	if err != nil {
+		return fmt.Errorf("failed to query WMI: %v", err)
 	}
 
-	for _, printer := range printers {
+	defer func() {
+		for _, instance := range win32PrinterInstances {
+			if err := instance.Close(); err != nil {
+				_ = level.Warn(logger).Log("msg", "failed to close WMI instance", "err", err)
+			}
+		}
+	}()
+
+	for _, printerInstance := range win32PrinterInstances {
+		printer, err := cimv2.NewWin32_PrinterEx1(printerInstance)
+		if err != nil {
+			return fmt.Errorf("failed to parse Win32_Printer: %w", err)
+		}
+
 		if c.config.PrinterExclude.MatchString(printer.Name) ||
 			!c.config.PrinterInclude.MatchString(printer.Name) {
 			continue
@@ -201,14 +218,24 @@ func (c *Collector) collectPrinterStatus(logger log.Logger, ch chan<- prometheus
 }
 
 func (c *Collector) collectPrinterJobStatus(logger log.Logger, ch chan<- prometheus.Metric) error {
-	var printJobs []wmiPrintJob
-
-	q := wmi.QueryAllForClass(&printJobs, "win32_PrintJob", logger)
-	if err := wmi.Query(q, &printJobs); err != nil {
-		return err
+	win32PrintJobInstances, err := c.wmiSession.EnumerateInstances("Win32_PrintJob")
+	if err != nil {
+		return fmt.Errorf("failed to query WMI: %v", err)
 	}
 
-	groupedPrintJobs := c.groupPrintJobs(printJobs)
+	defer func() {
+		for _, instance := range win32PrintJobInstances {
+			if err := instance.Close(); err != nil {
+				_ = level.Warn(logger).Log("msg", "failed to close WMI instance", "err", err)
+			}
+		}
+	}()
+
+	groupedPrintJobs, err := c.groupPrintJobs(win32PrintJobInstances)
+	if err != nil {
+		return fmt.Errorf("failed to group print jobs: %w", err)
+	}
+
 	for group, count := range groupedPrintJobs {
 		ch <- prometheus.MustNewConstMetric(
 			c.printerJobStatus,
@@ -227,12 +254,16 @@ type PrintJobStatusGroup struct {
 	status      string
 }
 
-func (c *Collector) groupPrintJobs(printJobs []wmiPrintJob) map[PrintJobStatusGroup]int {
+func (c *Collector) groupPrintJobs(win32PrintJobInstances []*cim.WmiInstance) (map[PrintJobStatusGroup]int, error) {
 	groupedPrintJobs := make(map[PrintJobStatusGroup]int)
 
-	for _, printJob := range printJobs {
-		printerName := strings.Split(printJob.Name, ",")[0]
+	for _, printJobInstance := range win32PrintJobInstances {
+		printJob, err := cimv2.NewWin32_PrintJobEx1(printJobInstance)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse Win32_PrintJob: %w", err)
+		}
 
+		printerName := strings.Split(printJob.Name, ",")[0]
 		if c.config.PrinterExclude.MatchString(printerName) ||
 			!c.config.PrinterInclude.MatchString(printerName) {
 			continue
@@ -244,5 +275,5 @@ func (c *Collector) groupPrintJobs(printJobs []wmiPrintJob) map[PrintJobStatusGr
 		}]++
 	}
 
-	return groupedPrintJobs
+	return groupedPrintJobs, nil
 }

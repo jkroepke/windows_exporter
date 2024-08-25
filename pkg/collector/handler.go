@@ -54,9 +54,11 @@ func (c *Collectors) BuildServeHTTP(logger log.Logger, disableExporterMetrics bo
 				_ = level.Warn(logger).Log("msg", fmt.Sprintf("Couldn't parse X-Prometheus-Scrape-Timeout-Seconds: %q. Defaulting timeout to %f", v, defaultTimeout))
 			}
 		}
+
 		if timeoutSeconds == 0 {
 			timeoutSeconds = defaultTimeout
 		}
+
 		timeoutSeconds -= timeoutMargin
 
 		reg := prometheus.NewRegistry()
@@ -64,7 +66,11 @@ func (c *Collectors) BuildServeHTTP(logger log.Logger, disableExporterMetrics bo
 		if err != nil {
 			_ = level.Warn(logger).Log("msg", "Couldn't create filtered metrics handler", "err", err)
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(fmt.Sprintf("Couldn't create filtered metrics handler: %s", err))) //nolint:errcheck
+
+			if _, err := w.Write([]byte(fmt.Sprintf("Couldn't create filtered metrics handler: %s", err))); err != nil {
+				_ = level.Warn(logger).Log("msg", "Couldn't write error response", "err", err)
+			}
+
 			return
 		}
 

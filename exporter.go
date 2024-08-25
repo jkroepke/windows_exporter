@@ -7,13 +7,12 @@ package main
 //goland:noinspection GoUnsortedImport
 //nolint:gofumpt
 import (
-	// Its important that we do these first so that we can register with the Windows service control ASAP to avoid timeouts.
-	"github.com/prometheus-community/windows_exporter/pkg/initiate"
-
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -24,6 +23,9 @@ import (
 	"strings"
 	"time"
 
+	// Its important that we do these first so that we can register with the Windows service control ASAP to avoid timeouts.
+	"github.com/prometheus-community/windows_exporter/pkg/initiate"
+
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log/level"
 	"github.com/prometheus-community/windows_exporter/pkg/collector"
@@ -32,7 +34,6 @@ import (
 	"github.com/prometheus-community/windows_exporter/pkg/log/flag"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
 	"github.com/prometheus-community/windows_exporter/pkg/utils"
-	"github.com/prometheus-community/windows_exporter/pkg/wmi"
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/exporter-toolkit/web"
 	webflag "github.com/prometheus/exporter-toolkit/web/kingpinflag"
@@ -196,10 +197,9 @@ func main() {
 		}
 	}
 
-	if err = wmi.InitWbem(logger); err != nil {
-		_ = level.Error(logger).Log("err", err)
-		os.Exit(1)
-	}
+	// silence log output from the wmi library
+	// https://github.com/microsoft/wmi/issues/128
+	log.SetOutput(io.Discard)
 
 	enabledCollectorList := utils.ExpandEnabledCollectors(*enabledCollectors)
 	collectors.Enable(enabledCollectorList)
@@ -288,6 +288,10 @@ func main() {
 		_ = level.Info(logger).Log("msg", "Shutting down windows_exporter via kill signal")
 	case <-initiate.StopCh:
 		_ = level.Info(logger).Log("msg", "Shutting down windows_exporter via service control")
+	}
+
+	if err := collectors.Close(); err != nil {
+		_ = level.Error(logger).Log("msg", "error closing collectors", "err", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

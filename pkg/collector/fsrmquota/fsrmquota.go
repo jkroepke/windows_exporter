@@ -3,12 +3,15 @@
 package fsrmquota
 
 import (
+	"fmt"
+
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
 	"github.com/prometheus-community/windows_exporter/pkg/utils"
-	"github.com/prometheus-community/windows_exporter/pkg/wmi"
+	"github.com/prometheus-community/windows_exporter/pkg/wmihelper"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -20,6 +23,8 @@ var ConfigDefaults = Config{}
 
 type Collector struct {
 	config Config
+
+	wmiSession *cim.WmiSession
 
 	quotasCount *prometheus.Desc
 	peakUsage   *prometheus.Desc
@@ -58,10 +63,20 @@ func (c *Collector) GetPerfCounter(_ log.Logger) ([]string, error) {
 }
 
 func (c *Collector) Close() error {
+	if c.wmiSession != nil {
+		c.wmiSession.Dispose()
+	}
+
 	return nil
 }
 
-func (c *Collector) Build(_ log.Logger) error {
+func (c *Collector) Build(_ log.Logger, sessionManager *cim.WmiSessionManager) error {
+	var err error
+
+	if c.wmiSession, err = wmihelper.OpenSession(sessionManager, `ROOT\Microsoft\Windows\FSRM`); err != nil {
+		return fmt.Errorf("failed to open WMI session: %w", err)
+	}
+
 	c.quotasCount = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "count"),
 		"Number of Quotas",
@@ -130,9 +145,9 @@ func (c *Collector) Collect(_ *types.ScrapeContext, logger log.Logger, ch chan<-
 	return nil
 }
 
-// MSFT_FSRMQuota docs:
+// MSFTFSRMQuota docs:
 // https://docs.microsoft.com/en-us/previous-versions/windows/desktop/fsrm/msft-fsrmquota
-type MSFT_FSRMQuota struct {
+type MSFTFSRMQuota struct {
 	Name string
 
 	Path        string
@@ -148,17 +163,13 @@ type MSFT_FSRMQuota struct {
 }
 
 func (c *Collector) collect(logger log.Logger, ch chan<- prometheus.Metric) error {
-	var dst []MSFT_FSRMQuota
-	q := wmi.QueryAll(&dst, logger)
+	var msftFSRMQuotas []MSFTFSRMQuota
 
-	var count int
-
-	if err := wmi.QueryNamespace(q, &dst, "root/microsoft/windows/fsrm"); err != nil {
-		return err
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "MSFT_FSRMQuota", &msftFSRMQuotas); err != nil {
+		return fmt.Errorf("failed to query instances: %w", err)
 	}
 
-	for _, quota := range dst {
-		count++
+	for _, quota := range msftFSRMQuotas {
 		path := quota.Path
 		template := quota.Template
 		Description := quota.Description
@@ -216,7 +227,7 @@ func (c *Collector) collect(logger log.Logger, ch chan<- prometheus.Metric) erro
 	ch <- prometheus.MustNewConstMetric(
 		c.quotasCount,
 		prometheus.GaugeValue,
-		float64(count),
+		float64(len(msftFSRMQuotas)),
 	)
 	return nil
 }

@@ -1,10 +1,13 @@
 package mscluster_cluster
 
 import (
+	"fmt"
+
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
-	"github.com/prometheus-community/windows_exporter/pkg/wmi"
+	"github.com/prometheus-community/windows_exporter/pkg/wmihelper"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -17,6 +20,8 @@ var ConfigDefaults = Config{}
 // A Collector is a Prometheus Collector for WMI MSCluster_Cluster metrics.
 type Collector struct {
 	config Config
+
+	wmiSession *cim.WmiSession
 
 	addEvictDelay                           *prometheus.Desc
 	adminAccessPoint                        *prometheus.Desc
@@ -122,10 +127,20 @@ func (c *Collector) GetPerfCounter(_ log.Logger) ([]string, error) {
 }
 
 func (c *Collector) Close() error {
+	if c.wmiSession != nil {
+		c.wmiSession.Dispose()
+	}
+
 	return nil
 }
 
-func (c *Collector) Build(_ log.Logger) error {
+func (c *Collector) Build(_ log.Logger, sessionManager *cim.WmiSessionManager) error {
+	var err error
+
+	if c.wmiSession, err = wmihelper.OpenSession(sessionManager, `Root\MSCluster`); err != nil {
+		return fmt.Errorf("failed to open WMI session: %w", err)
+	}
+
 	c.addEvictDelay = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "add_evict_delay"),
 		"Provides access to the cluster's AddEvictDelay property, which is the number a seconds that a new node is delayed after an eviction of another node.",
@@ -591,97 +606,13 @@ func (c *Collector) Build(_ log.Logger) error {
 	return nil
 }
 
-// MSCluster_Cluster docs:
-// - https://docs.microsoft.com/en-us/previous-versions/windows/desktop/cluswmi/mscluster-cluster
-type MSCluster_Cluster struct {
-	Name string
-
-	AddEvictDelay                           uint
-	AdminAccessPoint                        uint
-	AutoAssignNodeSite                      uint
-	AutoBalancerLevel                       uint
-	AutoBalancerMode                        uint
-	BackupInProgress                        uint
-	BlockCacheSize                          uint
-	ClusSvcHangTimeout                      uint
-	ClusSvcRegroupOpeningTimeout            uint
-	ClusSvcRegroupPruningTimeout            uint
-	ClusSvcRegroupStageTimeout              uint
-	ClusSvcRegroupTickInMilliseconds        uint
-	ClusterEnforcedAntiAffinity             uint
-	ClusterFunctionalLevel                  uint
-	ClusterGroupWaitDelay                   uint
-	ClusterLogLevel                         uint
-	ClusterLogSize                          uint
-	ClusterUpgradeVersion                   uint
-	CrossSiteDelay                          uint
-	CrossSiteThreshold                      uint
-	CrossSubnetDelay                        uint
-	CrossSubnetThreshold                    uint
-	CsvBalancer                             uint
-	DatabaseReadWriteMode                   uint
-	DefaultNetworkRole                      uint
-	DetectedCloudPlatform                   uint
-	DetectManagedEvents                     uint
-	DetectManagedEventsThreshold            uint
-	DisableGroupPreferredOwnerRandomization uint
-	DrainOnShutdown                         uint
-	DynamicQuorumEnabled                    uint
-	EnableSharedVolumes                     uint
-	FixQuorum                               uint
-	GracePeriodEnabled                      uint
-	GracePeriodTimeout                      uint
-	GroupDependencyTimeout                  uint
-	HangRecoveryAction                      uint
-	IgnorePersistentStateOnStartup          uint
-	LogResourceControls                     uint
-	LowerQuorumPriorityNodeId               uint
-	MaxNumberOfNodes                        uint
-	MessageBufferLength                     uint
-	MinimumNeverPreemptPriority             uint
-	MinimumPreemptorPriority                uint
-	NetftIPSecEnabled                       uint
-	PlacementOptions                        uint
-	PlumbAllCrossSubnetRoutes               uint
-	PreventQuorum                           uint
-	QuarantineDuration                      uint
-	QuarantineThreshold                     uint
-	QuorumArbitrationTimeMax                uint
-	QuorumArbitrationTimeMin                uint
-	QuorumLogFileSize                       uint
-	QuorumTypeValue                         uint
-	RequestReplyTimeout                     uint
-	ResiliencyDefaultPeriod                 uint
-	ResiliencyLevel                         uint
-	ResourceDllDeadlockPeriod               uint
-	RootMemoryReserved                      uint
-	RouteHistoryLength                      uint
-	S2DBusTypes                             uint
-	S2DCacheDesiredState                    uint
-	S2DCacheFlashReservePercent             uint
-	S2DCachePageSizeKBytes                  uint
-	S2DEnabled                              uint
-	S2DIOLatencyThreshold                   uint
-	S2DOptimizations                        uint
-	SameSubnetDelay                         uint
-	SameSubnetThreshold                     uint
-	SecurityLevel                           uint
-	SecurityLevelForStorage                 uint
-	SharedVolumeVssWriterOperationTimeout   uint
-	ShutdownTimeoutInMinutes                uint
-	UseClientAccessNetworksForSharedVolumes uint
-	WitnessDatabaseWriteTimeout             uint
-	WitnessDynamicWeight                    uint
-	WitnessRestartInterval                  uint
-}
-
 // Collect sends the metric values for each metric
 // to the provided prometheus Metric channel.
 func (c *Collector) Collect(_ *types.ScrapeContext, logger log.Logger, ch chan<- prometheus.Metric) error {
 	logger = log.With(logger, "collector", Name)
+
 	var dst []MSCluster_Cluster
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.QueryNamespace(q, &dst, "root/MSCluster"); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "MSCluster_Cluster", &dst); err != nil {
 		return err
 	}
 

@@ -11,6 +11,7 @@ import (
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/perflib"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
@@ -262,7 +263,7 @@ func (c *Collector) Close() error {
 	return nil
 }
 
-func (c *Collector) Build(logger log.Logger) error {
+func (c *Collector) Build(logger log.Logger, _ *cim.WmiSessionManager) error {
 	logger = log.With(logger, "collector", Name)
 
 	c.iisVersion = getIISVersion(logger)

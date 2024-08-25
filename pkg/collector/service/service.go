@@ -13,9 +13,11 @@ import (
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/microsoft/wmi/pkg/constant"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
 	"github.com/prometheus-community/windows_exporter/pkg/utils"
-	"github.com/prometheus-community/windows_exporter/pkg/wmi"
+	"github.com/prometheus-community/windows_exporter/pkg/wmihelper"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -40,6 +42,8 @@ type Collector struct {
 	serviceWhereClause *string
 	useAPI             *bool
 	v2                 *bool
+
+	wmiSession *cim.WmiSession
 
 	Information *prometheus.Desc
 	State       *prometheus.Desc
@@ -87,11 +91,21 @@ func (c *Collector) GetPerfCounter(_ log.Logger) ([]string, error) {
 }
 
 func (c *Collector) Close() error {
+	if c.wmiSession != nil {
+		c.wmiSession.Dispose()
+	}
+
 	return nil
 }
 
-func (c *Collector) Build(logger log.Logger) error {
+func (c *Collector) Build(logger log.Logger, sessionManager *cim.WmiSessionManager) error {
 	logger = log.With(logger, "collector", Name)
+
+	var err error
+
+	if c.wmiSession, err = wmihelper.OpenSession(sessionManager, string(constant.CimV2)); err != nil {
+		return fmt.Errorf("failed to open WMI session: %w", err)
+	}
 
 	if utils.IsEmpty(c.serviceWhereClause) {
 		_ = level.Warn(logger).Log("msg", "No where-clause specified for service collector. This will generate a very large number of metrics!")
@@ -222,10 +236,16 @@ var (
 
 func (c *Collector) collectWMI(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_Service
-	q := wmi.QueryAllWhere(&dst, *c.serviceWhereClause, logger) //nolint:staticcheck
-	if err := wmi.Query(q, &dst); err != nil {
+
+	query := "SELECT * FROM Win32_Service"
+	if *c.serviceWhereClause != "" {
+		query += " WHERE " + *c.serviceWhereClause
+	}
+
+	if err := wmihelper.RawQueryAll(logger, c.wmiSession, query, &dst); err != nil {
 		return err
 	}
+
 	for _, service := range dst {
 		pid := strconv.FormatUint(uint64(service.ProcessId), 10)
 

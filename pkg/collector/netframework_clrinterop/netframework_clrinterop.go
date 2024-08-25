@@ -3,11 +3,15 @@
 package netframework_clrinterop
 
 import (
+	"fmt"
+
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/microsoft/wmi/pkg/constant"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
-	"github.com/prometheus-community/windows_exporter/pkg/wmi"
+	"github.com/prometheus-community/windows_exporter/pkg/wmihelper"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -20,6 +24,8 @@ var ConfigDefaults = Config{}
 // A Collector is a Prometheus Collector for WMI Win32_PerfRawData_NETFramework_NETCLRInterop metrics.
 type Collector struct {
 	config Config
+
+	wmiSession *cim.WmiSession
 
 	numberOfCCWs        *prometheus.Desc
 	numberOfMarshalling *prometheus.Desc
@@ -51,10 +57,20 @@ func (c *Collector) GetPerfCounter(_ log.Logger) ([]string, error) {
 }
 
 func (c *Collector) Close() error {
+	if c.wmiSession != nil {
+		c.wmiSession.Dispose()
+	}
+
 	return nil
 }
 
-func (c *Collector) Build(_ log.Logger) error {
+func (c *Collector) Build(_ log.Logger, sessionManager *cim.WmiSessionManager) error {
+	var err error
+
+	if c.wmiSession, err = wmihelper.OpenSession(sessionManager, string(constant.CimV2)); err != nil {
+		return fmt.Errorf("failed to open WMI session: %w", err)
+	}
+
 	c.numberOfCCWs = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "com_callable_wrappers_total"),
 		"Displays the current number of COM callable wrappers (CCWs). A CCW is a proxy for a managed object being referenced from an unmanaged COM client.",
@@ -99,8 +115,7 @@ type Win32_PerfRawData_NETFramework_NETCLRInterop struct {
 
 func (c *Collector) collect(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_PerfRawData_NETFramework_NETCLRInterop
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "Win32_PerfRawData_NETFramework_NETCLRInterop", &dst); err != nil {
 		return err
 	}
 

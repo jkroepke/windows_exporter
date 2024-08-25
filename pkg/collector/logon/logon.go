@@ -3,13 +3,13 @@
 package logon
 
 import (
-	"errors"
+	"fmt"
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
-	"github.com/prometheus-community/windows_exporter/pkg/wmi"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -22,6 +22,8 @@ var ConfigDefaults = Config{}
 // A Collector is a Prometheus Collector for WMI metrics.
 type Collector struct {
 	config Config
+
+	wmiSession *cim.WmiSession
 
 	logonType *prometheus.Desc
 }
@@ -51,10 +53,26 @@ func (c *Collector) GetPerfCounter(_ log.Logger) ([]string, error) {
 }
 
 func (c *Collector) Close() error {
+	if c.wmiSession != nil {
+		c.wmiSession.Dispose()
+	}
+
 	return nil
 }
 
-func (c *Collector) Build(_ log.Logger) error {
+func (c *Collector) Build(_ log.Logger, sessionManager *cim.WmiSessionManager) error {
+	wmiSession, err := sessionManager.GetLocalSession("ROOT\\CimV2")
+	if err != nil {
+		return fmt.Errorf("failed to connect to WMI: %w", err)
+	}
+
+	connected, err := wmiSession.Connect()
+	if !connected || err != nil {
+		return fmt.Errorf("failed to connect to WMI: %w", err)
+	}
+
+	c.wmiSession = wmiSession
+
 	c.logonType = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "logon_type"),
 		"Number of active logon sessions (LogonSession.LogonType)",
@@ -75,39 +93,57 @@ func (c *Collector) Collect(_ *types.ScrapeContext, logger log.Logger, ch chan<-
 	return nil
 }
 
-// Win32_LogonSession docs:
-// - https://docs.microsoft.com/en-us/windows/win32/cimwin32prov/win32-logonsession
-type Win32_LogonSession struct {
-	LogonType uint32
-}
-
 func (c *Collector) collect(logger log.Logger, ch chan<- prometheus.Metric) error {
-	var dst []Win32_LogonSession
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
-		return err
+	// Win32_LogonSession docs:
+	// https://docs.microsoft.com/en-us/windows/win32/cimwin32prov/win32-logonsession
+	// https://wutils.com/wmi/root/cimv2/win32_logonsession/
+
+	logonSessionInstances, err := c.wmiSession.QueryInstances("SELECT LogonType FROM Win32_LogonSession")
+	if err != nil {
+		return fmt.Errorf("failed to query WMI: %v", err)
 	}
-	if len(dst) == 0 {
-		return errors.New("WMI query returned empty result set")
+
+	defer func() {
+		for _, instance := range logonSessionInstances {
+			if err := instance.Close(); err != nil {
+				_ = level.Warn(logger).Log("msg", "failed to close WMI instance", "err", err)
+			}
+		}
+	}()
+
+	if len(logonSessionInstances) == 0 {
+		return fmt.Errorf("no Win32_Processor instances found")
 	}
 
 	// Init counters
-	system := 0
-	interactive := 0
-	network := 0
-	batch := 0
-	service := 0
-	proxy := 0
-	unlock := 0
-	networkcleartext := 0
-	newcredentials := 0
-	remoteinteractive := 0
-	cachedinteractive := 0
-	cachedremoteinteractive := 0
-	cachedunlock := 0
+	var (
+		system                  int
+		interactive             int
+		network                 int
+		batch                   int
+		service                 int
+		proxy                   int
+		unlock                  int
+		networkClearText        int
+		newCredentials          int
+		remoteInteractive       int
+		cachedInteractive       int
+		cachedRemoteInterActive int
+		cachedUnlock            int
+	)
 
-	for _, entry := range dst {
-		switch entry.LogonType {
+	for _, instance := range logonSessionInstances {
+		propertyLogonType, err := instance.GetProperty("LogonType")
+		if err != nil {
+			return fmt.Errorf("failed to get LogonType property: %w", err)
+		}
+
+		logonType, ok := propertyLogonType.(uint32)
+		if !ok {
+			return fmt.Errorf("failed to cast LogonType to uint32: %v", propertyLogonType)
+		}
+
+		switch logonType {
 		case 0:
 			system++
 		case 2:
@@ -123,17 +159,17 @@ func (c *Collector) collect(logger log.Logger, ch chan<- prometheus.Metric) erro
 		case 7:
 			unlock++
 		case 8:
-			networkcleartext++
+			networkClearText++
 		case 9:
-			newcredentials++
+			newCredentials++
 		case 10:
-			remoteinteractive++
+			remoteInteractive++
 		case 11:
-			cachedinteractive++
+			cachedInteractive++
 		case 12:
-			cachedremoteinteractive++
+			cachedRemoteInterActive++
 		case 13:
-			cachedunlock++
+			cachedUnlock++
 		}
 	}
 
@@ -189,43 +225,44 @@ func (c *Collector) collect(logger log.Logger, ch chan<- prometheus.Metric) erro
 	ch <- prometheus.MustNewConstMetric(
 		c.logonType,
 		prometheus.GaugeValue,
-		float64(networkcleartext),
+		float64(networkClearText),
 		"network_clear_text",
 	)
 
 	ch <- prometheus.MustNewConstMetric(
 		c.logonType,
 		prometheus.GaugeValue,
-		float64(newcredentials),
+		float64(newCredentials),
 		"new_credentials",
 	)
 
 	ch <- prometheus.MustNewConstMetric(
 		c.logonType,
 		prometheus.GaugeValue,
-		float64(remoteinteractive),
+		float64(remoteInteractive),
 		"remote_interactive",
 	)
 
 	ch <- prometheus.MustNewConstMetric(
 		c.logonType,
 		prometheus.GaugeValue,
-		float64(cachedinteractive),
+		float64(cachedInteractive),
 		"cached_interactive",
 	)
 
 	ch <- prometheus.MustNewConstMetric(
 		c.logonType,
 		prometheus.GaugeValue,
-		float64(remoteinteractive),
+		float64(remoteInteractive),
 		"cached_remote_interactive",
 	)
 
 	ch <- prometheus.MustNewConstMetric(
 		c.logonType,
 		prometheus.GaugeValue,
-		float64(cachedunlock),
+		float64(cachedUnlock),
 		"cached_unlock",
 	)
+
 	return nil
 }

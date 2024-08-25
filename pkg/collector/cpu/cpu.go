@@ -7,6 +7,7 @@ import (
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/perflib"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
 	"github.com/prometheus-community/windows_exporter/pkg/winversion"
@@ -68,7 +69,7 @@ func (c *Collector) Close() error {
 	return nil
 }
 
-func (c *Collector) Build(_ log.Logger) error {
+func (c *Collector) Build(_ log.Logger, _ *cim.WmiSessionManager) error {
 	c.cStateSecondsTotal = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "cstate_seconds_total"),
 		"Time spent in low-power idle state",

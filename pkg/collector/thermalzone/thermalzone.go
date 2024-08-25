@@ -4,12 +4,15 @@ package thermalzone
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/microsoft/wmi/pkg/constant"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
-	"github.com/prometheus-community/windows_exporter/pkg/wmi"
+	"github.com/prometheus-community/windows_exporter/pkg/wmihelper"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -22,6 +25,8 @@ var ConfigDefaults = Config{}
 // A Collector is a Prometheus Collector for WMI Win32_PerfRawData_Counters_ThermalZoneInformation metrics.
 type Collector struct {
 	config Config
+
+	wmiSession *cim.WmiSession
 
 	percentPassiveLimit *prometheus.Desc
 	temperature         *prometheus.Desc
@@ -53,10 +58,20 @@ func (c *Collector) GetPerfCounter(_ log.Logger) ([]string, error) {
 }
 
 func (c *Collector) Close() error {
+	if c.wmiSession != nil {
+		c.wmiSession.Dispose()
+	}
+
 	return nil
 }
 
-func (c *Collector) Build(_ log.Logger) error {
+func (c *Collector) Build(_ log.Logger, sessionManager *cim.WmiSessionManager) error {
+	var err error
+
+	if c.wmiSession, err = wmihelper.OpenSession(sessionManager, string(constant.CimV2)); err != nil {
+		return fmt.Errorf("failed to open WMI session: %w", err)
+	}
+
 	c.temperature = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "temperature_celsius"),
 		"(Temperature)",
@@ -107,8 +122,7 @@ type Win32_PerfRawData_Counters_ThermalZoneInformation struct {
 
 func (c *Collector) collect(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_PerfRawData_Counters_ThermalZoneInformation
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "Win32_PerfRawData_Counters_ThermalZoneInformation", &dst); err != nil {
 		return err
 	}
 

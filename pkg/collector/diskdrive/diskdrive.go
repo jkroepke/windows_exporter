@@ -4,13 +4,17 @@ package diskdrive
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/microsoft/wmi/pkg/constant"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
+	"github.com/microsoft/wmi/server2019/root/cimv2"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
-	"github.com/prometheus-community/windows_exporter/pkg/wmi"
+	"github.com/prometheus-community/windows_exporter/pkg/wmihelper"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -26,6 +30,8 @@ var ConfigDefaults = Config{}
 // A Collector is a Prometheus Collector for a few WMI metrics in Win32_DiskDrive.
 type Collector struct {
 	config Config
+
+	wmiSession *cim.WmiSession
 
 	availability *prometheus.Desc
 	diskInfo     *prometheus.Desc
@@ -59,10 +65,19 @@ func (c *Collector) GetPerfCounter(_ log.Logger) ([]string, error) {
 }
 
 func (c *Collector) Close() error {
+	if c.wmiSession != nil {
+		c.wmiSession.Dispose()
+	}
+
 	return nil
 }
 
-func (c *Collector) Build(_ log.Logger) error {
+func (c *Collector) Build(_ log.Logger, sessionManager *cim.WmiSessionManager) error {
+	var err error
+	if c.wmiSession, err = wmihelper.OpenSession(sessionManager, string(constant.CimV2)); err != nil {
+		return fmt.Errorf("failed to open WMI session: %w", err)
+	}
+
 	c.diskInfo = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "info"),
 		"General drive information",
@@ -100,17 +115,6 @@ func (c *Collector) Build(_ log.Logger) error {
 	)
 
 	return nil
-}
-
-type win32_DiskDrive struct {
-	DeviceID     string
-	Model        string
-	Size         uint64
-	Name         string
-	Caption      string
-	Partitions   uint32
-	Status       string
-	Availability uint16
 }
 
 var (
@@ -157,24 +161,31 @@ var (
 // Collect sends the metric values for each metric to the provided prometheus Metric channel.
 func (c *Collector) Collect(_ *types.ScrapeContext, logger log.Logger, ch chan<- prometheus.Metric) error {
 	logger = log.With(logger, "collector", Name)
-	if err := c.collect(ch); err != nil {
+	if err := c.collect(logger, ch); err != nil {
 		_ = level.Error(logger).Log("msg", "failed collecting disk_drive_info metrics", "err", err)
 		return err
 	}
 	return nil
 }
 
-func (c *Collector) collect(ch chan<- prometheus.Metric) error {
-	var dst []win32_DiskDrive
-
-	if err := wmi.Query(win32DiskQuery, &dst); err != nil {
-		return err
+func (c *Collector) collect(logger log.Logger, ch chan<- prometheus.Metric) error {
+	instances, err := c.wmiSession.EnumerateInstances("Win32_DiskDrive")
+	if err != nil {
+		return fmt.Errorf("failed to query instances: %w", err)
 	}
-	if len(dst) == 0 {
+
+	if len(instances) == 0 {
 		return errors.New("WMI query returned empty result set")
 	}
 
-	for _, disk := range dst {
+	defer wmihelper.CloseInstances(logger, instances)
+
+	for _, diskInstance := range instances {
+		disk, err := cimv2.NewWin32_DiskDriveEx1(diskInstance)
+		if err != nil {
+			return fmt.Errorf("failed to create Win32_DiskDrive instance: %w", err)
+		}
+
 		ch <- prometheus.MustNewConstMetric(
 			c.diskInfo,
 			prometheus.GaugeValue,

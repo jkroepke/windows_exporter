@@ -12,10 +12,12 @@ import (
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/microsoft/wmi/pkg/constant"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/headers/wtsapi32"
 	"github.com/prometheus-community/windows_exporter/pkg/perflib"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
-	"github.com/prometheus-community/windows_exporter/pkg/wmi"
+	"github.com/prometheus-community/windows_exporter/pkg/wmihelper"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -32,18 +34,29 @@ type Win32_ServerFeature struct {
 	ID uint32
 }
 
-func isConnectionBrokerServer(logger log.Logger) bool {
-	var dst []Win32_ServerFeature
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+func isConnectionBrokerServer(logger log.Logger, sessionManager *cim.WmiSessionManager) bool {
+	session, err := wmihelper.OpenSession(sessionManager, string(constant.CimV2))
+	if err != nil {
+		_ = level.Error(logger).Log("msg", "failed to open session", "err", err)
+
 		return false
 	}
+
+	defer session.Dispose()
+
+	var dst []Win32_ServerFeature
+	if err := wmihelper.QueryAll(logger, session, "Win32_ServerFeature", &dst); err != nil {
+		return false
+	}
+
 	for _, d := range dst {
 		if d.ID == ConnectionBrokerFeatureID {
 			return true
 		}
 	}
+
 	_ = level.Debug(logger).Log("msg", "host is not a connection broker skipping Connection Broker performance metrics.")
+
 	return false
 }
 
@@ -54,9 +67,9 @@ func isConnectionBrokerServer(logger log.Logger) bool {
 type Collector struct {
 	config Config
 
-	connectionBrokerEnabled bool
-
 	hServer syscall.Handle
+
+	connectionBrokerEnabled bool
 
 	sessionInfo                 *prometheus.Desc
 	connectionBrokerPerformance *prometheus.Desc
@@ -111,10 +124,10 @@ func (c *Collector) Close() error {
 	return nil
 }
 
-func (c *Collector) Build(logger log.Logger) error {
+func (c *Collector) Build(logger log.Logger, sessionManager *cim.WmiSessionManager) error {
 	logger = log.With(logger, "collector", Name)
 
-	c.connectionBrokerEnabled = isConnectionBrokerServer(logger)
+	c.connectionBrokerEnabled = isConnectionBrokerServer(logger, sessionManager)
 
 	c.sessionInfo = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "session_info"),

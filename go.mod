@@ -1,6 +1,8 @@
 module github.com/prometheus-community/windows_exporter
 
-go 1.22
+go 1.22.5
+
+toolchain go1.23.0
 
 require (
 	github.com/Microsoft/hcsshim v0.12.5
@@ -40,6 +42,7 @@ require (
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/jpillora/backoff v1.0.0 // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
+	github.com/microsoft/wmi v0.5.0-alpha.25.0.20240816185533-b2434c82436c // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/mwitkow/go-conntrack v0.0.0-20190716064945-2f068394615f // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect

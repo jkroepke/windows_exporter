@@ -9,8 +9,10 @@ import (
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/microsoft/wmi/pkg/constant"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
-	"github.com/prometheus-community/windows_exporter/pkg/wmi"
+	"github.com/prometheus-community/windows_exporter/pkg/wmihelper"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -23,6 +25,8 @@ var ConfigDefaults = Config{}
 // Collector is a Prometheus Collector for hyper-v.
 type Collector struct {
 	config Config
+
+	wmiSession *cim.WmiSession
 
 	// Win32_PerfRawData_VmmsVirtualMachineStats_HyperVVirtualMachineHealthSummary
 	healthCritical *prometheus.Desc
@@ -164,10 +168,20 @@ func (c *Collector) GetPerfCounter(_ log.Logger) ([]string, error) {
 }
 
 func (c *Collector) Close() error {
+	if c.wmiSession != nil {
+		c.wmiSession.Dispose()
+	}
+
 	return nil
 }
 
-func (c *Collector) Build(_ log.Logger) error {
+func (c *Collector) Build(_ log.Logger, sessionManager *cim.WmiSessionManager) error {
+	var err error
+
+	if c.wmiSession, err = wmihelper.OpenSession(sessionManager, string(constant.CimV2)); err != nil {
+		return fmt.Errorf("failed to open WMI session: %w", err)
+	}
+
 	buildSubsystemName := func(component string) string { return "hyperv_" + component }
 
 	c.healthCritical = prometheus.NewDesc(
@@ -820,8 +834,7 @@ type Win32_PerfRawData_VmmsVirtualMachineStats_HyperVVirtualMachineHealthSummary
 
 func (c *Collector) collectVmHealth(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_PerfRawData_VmmsVirtualMachineStats_HyperVVirtualMachineHealthSummary
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "Win32_PerfRawData_VmmsVirtualMachineStats_HyperVVirtualMachineHealthSummary", &dst); err != nil {
 		return err
 	}
 
@@ -852,8 +865,7 @@ type Win32_PerfRawData_VidPerfProvider_HyperVVMVidPartition struct {
 
 func (c *Collector) collectVmVid(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_PerfRawData_VidPerfProvider_HyperVVMVidPartition
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "Win32_PerfRawData_VidPerfProvider_HyperVVMVidPartition", &dst); err != nil {
 		return err
 	}
 
@@ -915,8 +927,7 @@ type Win32_PerfRawData_HvStats_HyperVHypervisorRootPartition struct {
 
 func (c *Collector) collectVmHv(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_PerfRawData_HvStats_HyperVHypervisorRootPartition
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "Win32_PerfRawData_HvStats_HyperVHypervisorRootPartition", &dst); err != nil {
 		return err
 	}
 
@@ -1052,8 +1063,7 @@ type Win32_PerfRawData_HvStats_HyperVHypervisor struct {
 
 func (c *Collector) collectVmProcessor(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_PerfRawData_HvStats_HyperVHypervisor
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "Win32_PerfRawData_HvStats_HyperVHypervisor", &dst); err != nil {
 		return err
 	}
 
@@ -1084,8 +1094,7 @@ type Win32_PerfRawData_HvStats_HyperVHypervisorLogicalProcessor struct {
 
 func (c *Collector) collectHostLPUsage(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_PerfRawData_HvStats_HyperVHypervisorLogicalProcessor
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "Win32_PerfRawData_HvStats_HyperVHypervisorLogicalProcessor", &dst); err != nil {
 		return err
 	}
 
@@ -1138,8 +1147,7 @@ type Win32_PerfRawData_HvStats_HyperVHypervisorRootVirtualProcessor struct {
 
 func (c *Collector) collectHostCpuUsage(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_PerfRawData_HvStats_HyperVHypervisorRootVirtualProcessor
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "Win32_PerfRawData_HvStats_HyperVHypervisorRootVirtualProcessor", &dst); err != nil {
 		return err
 	}
 
@@ -1206,8 +1214,7 @@ type Win32_PerfRawData_HvStats_HyperVHypervisorVirtualProcessor struct {
 
 func (c *Collector) collectVmCpuUsage(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_PerfRawData_HvStats_HyperVHypervisorVirtualProcessor
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "Win32_PerfRawData_HvStats_HyperVHypervisorVirtualProcessor", &dst); err != nil {
 		return err
 	}
 
@@ -1299,8 +1306,7 @@ type Win32_PerfRawData_NvspSwitchStats_HyperVVirtualSwitch struct {
 
 func (c *Collector) collectVmSwitch(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_PerfRawData_NvspSwitchStats_HyperVVirtualSwitch
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "Win32_PerfRawData_NvspSwitchStats_HyperVVirtualSwitch", &dst); err != nil {
 		return err
 	}
 
@@ -1464,8 +1470,7 @@ type Win32_PerfRawData_EthernetPerfProvider_HyperVLegacyNetworkAdapter struct {
 
 func (c *Collector) collectVmEthernet(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_PerfRawData_EthernetPerfProvider_HyperVLegacyNetworkAdapter
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "Win32_PerfRawData_EthernetPerfProvider_HyperVLegacyNetworkAdapter", &dst); err != nil {
 		return err
 	}
 
@@ -1533,8 +1538,7 @@ type Win32_PerfRawData_Counters_HyperVVirtualStorageDevice struct {
 
 func (c *Collector) collectVmStorage(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_PerfRawData_Counters_HyperVVirtualStorageDevice
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "Win32_PerfRawData_Counters_HyperVVirtualStorageDevice", &dst); err != nil {
 		return err
 	}
 
@@ -1602,8 +1606,7 @@ type Win32_PerfRawData_NvspNicStats_HyperVVirtualNetworkAdapter struct {
 
 func (c *Collector) collectVmNetwork(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_PerfRawData_NvspNicStats_HyperVVirtualNetworkAdapter
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "Win32_PerfRawData_NvspNicStats_HyperVVirtualNetworkAdapter", &dst); err != nil {
 		return err
 	}
 
@@ -1675,8 +1678,7 @@ type Win32_PerfRawData_BalancerStats_HyperVDynamicMemoryVM struct {
 
 func (c *Collector) collectVmMemory(logger log.Logger, ch chan<- prometheus.Metric) error {
 	var dst []Win32_PerfRawData_BalancerStats_HyperVDynamicMemoryVM
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.Query(q, &dst); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "Win32_PerfRawData_BalancerStats_HyperVDynamicMemoryVM", &dst); err != nil {
 		return err
 	}
 

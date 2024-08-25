@@ -5,6 +5,7 @@ package dhcp
 import (
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/perflib"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
@@ -75,7 +76,7 @@ func (c *Collector) Close() error {
 	return nil
 }
 
-func (c *Collector) Build(_ log.Logger) error {
+func (c *Collector) Build(_ log.Logger, _ *cim.WmiSessionManager) error {
 	c.packetsReceivedTotal = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "packets_received_total"),
 		"Total number of packets received by the DHCP server (PacketsReceivedTotal)",

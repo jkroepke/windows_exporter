@@ -13,9 +13,10 @@ import (
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/perflib"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
-	"github.com/prometheus-community/windows_exporter/pkg/wmi"
+	"github.com/prometheus-community/windows_exporter/pkg/wmihelper"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sys/windows"
 )
@@ -38,6 +39,8 @@ var ConfigDefaults = Config{
 
 type Collector struct {
 	config Config
+
+	wmiSession *cim.WmiSession
 
 	lookupCache map[string]string
 
@@ -136,8 +139,22 @@ func (c *Collector) Close() error {
 	return nil
 }
 
-func (c *Collector) Build(logger log.Logger) error {
+func (c *Collector) Build(logger log.Logger, sessionManager *cim.WmiSessionManager) error {
 	logger = log.With(logger, "collector", Name)
+
+	if c.config.EnableWorkerProcess {
+		wmiSession, err := sessionManager.GetLocalSession("root\\WebAdministration")
+		if err != nil {
+			return fmt.Errorf("failed to connect to WMI: %w", err)
+		}
+
+		connected, err := wmiSession.Connect()
+		if !connected || err != nil {
+			return fmt.Errorf("failed to connect to WMI: %w", err)
+		}
+
+		c.wmiSession = wmiSession
+	}
 
 	if c.config.ProcessInclude.String() == "^(?:.*)$" && c.config.ProcessExclude.String() == "^(?:)$" {
 		_ = level.Warn(logger).Log("msg", "No filters specified for process collector. This will generate a very large number of metrics!")
@@ -276,6 +293,9 @@ type perflibProcess struct {
 	WorkingSet              float64 `perflib:"Working Set"`
 }
 
+// WorkerProcess is a struct to hold the AppPoolName and ProcessId of a worker process.
+//
+// Upstream: https://wutils.com/wmi/root/webadministration/workerprocess/
 type WorkerProcess struct {
 	AppPoolName string
 	ProcessId   uint64
@@ -291,10 +311,16 @@ func (c *Collector) Collect(ctx *types.ScrapeContext, logger log.Logger, ch chan
 
 	var workerProcesses []WorkerProcess
 	if c.config.EnableWorkerProcess {
-		queryWorkerProcess := wmi.QueryAllForClass(&workerProcesses, "WorkerProcess", logger)
-		if err := wmi.QueryNamespace(queryWorkerProcess, &workerProcesses, "root\\WebAdministration"); err != nil {
+		workerProcessInstances, err := c.wmiSession.EnumerateInstances("WorkerProcess")
+		if err != nil {
 			_ = level.Debug(logger).Log("msg", "Could not query WebAdministration namespace for IIS worker processes", "err", err)
 		}
+
+		if err = wmihelper.CastInstances(workerProcessInstances, &workerProcesses); err != nil {
+			_ = level.Debug(logger).Log("msg", "Could not cast WorkerProcess instances", "err", err)
+		}
+
+		wmihelper.CloseInstances(logger, workerProcessInstances)
 	}
 
 	var owner string

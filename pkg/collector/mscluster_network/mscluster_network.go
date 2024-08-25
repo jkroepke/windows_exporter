@@ -1,10 +1,13 @@
 package mscluster_network
 
 import (
+	"fmt"
+
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
-	"github.com/prometheus-community/windows_exporter/pkg/wmi"
+	"github.com/prometheus-community/windows_exporter/pkg/wmihelper"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -17,6 +20,8 @@ var ConfigDefaults = Config{}
 // A Collector is a Prometheus Collector for WMI MSCluster_Network metrics.
 type Collector struct {
 	config Config
+
+	wmiSession *cim.WmiSession
 
 	characteristics *prometheus.Desc
 	flags           *prometheus.Desc
@@ -50,10 +55,20 @@ func (c *Collector) GetPerfCounter(_ log.Logger) ([]string, error) {
 }
 
 func (c *Collector) Close() error {
+	if c.wmiSession != nil {
+		c.wmiSession.Dispose()
+	}
+
 	return nil
 }
 
-func (c *Collector) Build(_ log.Logger) error {
+func (c *Collector) Build(_ log.Logger, sessionManager *cim.WmiSessionManager) error {
+	var err error
+
+	if c.wmiSession, err = wmihelper.OpenSession(sessionManager, `Root\MSCluster`); err != nil {
+		return fmt.Errorf("failed to open WMI session: %w", err)
+	}
+
 	c.characteristics = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "characteristics"),
 		"Provides the characteristics of the network.",
@@ -103,9 +118,9 @@ type MSCluster_Network struct {
 // to the provided prometheus metric channel.
 func (c *Collector) Collect(_ *types.ScrapeContext, logger log.Logger, ch chan<- prometheus.Metric) error {
 	logger = log.With(logger, "collector", Name)
+
 	var dst []MSCluster_Network
-	q := wmi.QueryAll(&dst, logger)
-	if err := wmi.QueryNamespace(q, &dst, "root/MSCluster"); err != nil {
+	if err := wmihelper.QueryAll(logger, c.wmiSession, "MSCluster_Network", &dst); err != nil {
 		return err
 	}
 

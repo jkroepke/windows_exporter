@@ -3,13 +3,15 @@ package collector
 import (
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 type Collectors struct {
-	collectors       Map
-	perfCounterQuery string
+	collectors        Map
+	perfCounterQuery  string
+	wmiSessionManager *cim.WmiSessionManager
 }
 
 type (
@@ -19,7 +21,7 @@ type (
 
 // Collector interface that a collector has to implement.
 type Collector interface {
-	Build(logger log.Logger) error
+	Build(logger log.Logger, wmiSessionManager *cim.WmiSessionManager) error
 	// Close closes the collector
 	Close() error
 	// GetName get the name of the collector

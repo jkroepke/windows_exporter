@@ -9,6 +9,7 @@ import (
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
+	cim "github.com/microsoft/wmi/pkg/wmiinstance"
 	"github.com/prometheus-community/windows_exporter/pkg/collector/ad"
 	"github.com/prometheus-community/windows_exporter/pkg/collector/adcs"
 	"github.com/prometheus-community/windows_exporter/pkg/collector/adfs"
@@ -154,7 +155,8 @@ func NewWithConfig(config Config) Collectors {
 // New To be called by the external libraries for collector initialization.
 func New(collectors Map) Collectors {
 	return Collectors{
-		collectors: collectors,
+		collectors:        collectors,
+		wmiSessionManager: cim.NewWmiSessionManager(),
 	}
 }
 
@@ -201,7 +203,7 @@ func (c *Collectors) Build(logger log.Logger) error {
 	var err error
 
 	for _, collector := range c.collectors {
-		if err = collector.Build(logger); err != nil {
+		if err = collector.Build(logger, c.wmiSessionManager); err != nil {
 			return err
 		}
 	}
@@ -221,6 +223,10 @@ func (c *Collectors) PrepareScrapeContext() (*types.ScrapeContext, error) {
 
 // Close To be called by the exporter for collector cleanup.
 func (c *Collectors) Close() error {
+	if c.wmiSessionManager != nil {
+		c.wmiSessionManager.Dispose()
+	}
+
 	errs := make([]error, 0, len(c.collectors))
 
 	for _, collector := range c.collectors {
