@@ -2,8 +2,10 @@ package mi
 
 import (
 	"errors"
+	"fmt"
 	"unsafe"
 
+	cpp "github.com/lsegal/cppgo"
 	"golang.org/x/sys/windows"
 )
 
@@ -19,7 +21,7 @@ var (
 func MI_Application_Initialize() (*MI_Application, error) {
 	flags := uint32(0)
 
-	application := &MI_Application{}
+	application := &MI_ApplicationPTR{}
 
 	applicationId, err := windows.UTF16PtrFromString("windows_exporter")
 	if err != nil {
@@ -36,7 +38,19 @@ func MI_Application_Initialize() (*MI_Application, error) {
 		return nil, result
 	}
 
-	return application, nil
+	app := &MI_Application{}
+	app.reserved1 = application.reserved1
+	app.reserved2 = application.reserved2
+
+	var appFn MI_ApplicationFT
+
+	if err := cpp.ConvertRef(uintptr(unsafe.Pointer(application.ft)), &appFn); err != nil {
+		return nil, fmt.Errorf("failed to convert MI_ApplicationFT: %w", err)
+	}
+
+	app.ft = &appFn
+
+	return app, nil
 }
 
 // MI_Application_NewSession creates a new session.
@@ -63,7 +77,7 @@ func MI_Application_NewSession(application *MI_Application, protocol Protocol) (
 		uintptr(unsafe.Pointer(session)),
 	)
 
-	result := r0
+	result := MI_Result(r0)
 
 	if !errors.Is(result, MI_RESULT_OK) {
 		return nil, result

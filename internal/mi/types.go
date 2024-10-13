@@ -106,15 +106,15 @@ func (r MI_Result) String() string {
 	}
 }
 
-type MI_Application struct {
+type MI_ApplicationPTR struct {
 	reserved1 uint64
 	reserved2 uintptr
-	ft        *MI_ApplicationFT
+	ft        *MI_ApplicationFTPTR
 }
 
-type MI_ApplicationFT struct {
+type MI_ApplicationFTPTR struct {
 	Close                          uintptr
-	NewSession                     func(application, protocol, destination, options, callbacks, extendedError, session uintptr) MI_Result
+	NewSession                     uintptr
 	NewHostedProvider              uintptr
 	NewInstance                    uintptr
 	NewDestinationOptions          uintptr
@@ -124,6 +124,26 @@ type MI_ApplicationFT struct {
 	NewDeserializer                uintptr
 	NewInstanceFromClass           uintptr
 	NewClass                       uintptr
+}
+
+type MI_Application struct {
+	reserved1 uint64
+	reserved2 uintptr
+	ft        *MI_ApplicationFT
+}
+
+type MI_ApplicationFT struct {
+	Close                          func()
+	NewSession                     func(application, protocol, destination, options, callbacks, extendedError, session uintptr) uintptr `call:"std"`
+	NewHostedProvider              func()
+	NewInstance                    func()
+	NewDestinationOptions          func()
+	NewOperationOptions            func()
+	NewSubscriptionDeliveryOptions func()
+	NewSerializer                  func()
+	NewDeserializer                func()
+	NewInstanceFromClass           func()
+	NewClass                       func()
 }
 
 // MI_Session represents a session.
