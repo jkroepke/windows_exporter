@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"unsafe"
 
-	cpp "github.com/lsegal/cppgo"
+	"github.com/ebitengine/purego"
 	"golang.org/x/sys/windows"
 )
 

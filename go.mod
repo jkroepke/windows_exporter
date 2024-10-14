@@ -7,6 +7,7 @@ require (
 	github.com/alecthomas/kingpin/v2 v2.4.0
 	github.com/bmatcuk/doublestar/v4 v4.6.1
 	github.com/dimchansky/utfbom v1.1.1
+	github.com/ebitengine/purego v0.8.0
 	github.com/go-ole/go-ole v1.3.0
 	github.com/google/uuid v1.6.0
 	github.com/prometheus/client_golang v1.20.4
@@ -31,7 +32,6 @@ require (
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/jpillora/backoff v1.0.0 // indirect
 	github.com/klauspost/compress v1.17.10 // indirect
-	github.com/lsegal/cppgo v0.0.0-20240201173128-13fc70c9544b // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/mdlayher/vsock v1.2.1 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
