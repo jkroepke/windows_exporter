@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"strconv"
+	"syscall"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -110,7 +111,7 @@ const (
 // MI_Application_Initialize initializes the MI application.
 // https://docs.microsoft.com/en-us/windows/win32/api/miapi/nf-miapi-mi_application_initializev1
 // It is recommended to have only one MI_Application per process.
-func MI_Application_Initialize() (*MI_Application, error) {
+func MI_Application_Initialize() (*MI_ApplicationPTR, error) {
 	flags := uint32(0)
 
 	application := &MI_ApplicationPTR{}
@@ -140,12 +141,12 @@ func MI_Application_Initialize() (*MI_Application, error) {
 
 	app.ft = &appFn
 
-	return app, nil
+	return application, nil
 }
 
 // MI_Application_NewSession creates a new session.
 // https://learn.microsoft.com/en-us/windows/win32/api/mi/nf-mi-mi_application_newsession
-func MI_Application_NewSession(application *MI_Application, protocol Protocol) (*MI_Session, error) {
+func MI_Application_NewSession(application *MI_ApplicationPTR, protocol Protocol) (*MI_Session, error) {
 	if application.ft == nil {
 		return nil, errors.New("MI_Application is not initialized")
 	}
@@ -157,7 +158,8 @@ func MI_Application_NewSession(application *MI_Application, protocol Protocol) (
 
 	session := &MI_Session{}
 
-	r0 := application.ft.NewSession(
+	r0, _, _ := syscall.SyscallN(
+		application.ft.NewSession,
 		uintptr(unsafe.Pointer(application)),
 		uintptr(unsafe.Pointer(protocolUTF16)),
 		0,
