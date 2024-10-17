@@ -26,35 +26,37 @@ func Test_MI_Query(t *testing.T) {
 	session, err := mi.Application_NewSession(application, mi.ProtocolWINRM)
 	require.NoError(t, err)
 	require.NotEmpty(t, session)
+	/*
+		operation, err := mi.Session_TestConnection(session, mi.OperationNoFlags)
 
-	operation, err := mi.Session_TestConnection(session, mi.OperationNoFlags)
+		require.NoError(t, err)
+		require.NotEmpty(t, operation)
+
+		for {
+			class, moreResults, err := mi.Operation_GetInstance(operation)
+			require.NoError(t, err)
+			require.NotEmpty(t, class)
+
+			if !moreResults {
+				break
+			}
+		}
+
+		require.NoError(t, mi.Operation_Close(operation))
+
+	*/
+	operation, err := mi.Session_QueryInstances(session, mi.OperationFlagsNoRTTI, mi.NamespaceRootCIMv2, mi.QueryDialectWQL,
+		"SELECT Architecture, DeviceId, Description, Family, L2CacheSize, L3CacheSize, Name, ThreadCount, NumberOfCores, NumberOfEnabledCore, NumberOfLogicalProcessors FROM Win32_Processor")
 
 	require.NoError(t, err)
 	require.NotEmpty(t, operation)
-
 	for {
-		class, moreResults, err := mi.Operation_GetClass(operation)
+		instance, moreResults, err := mi.Operation_GetInstance(operation)
 		require.NoError(t, err)
-		require.NotEmpty(t, class)
+		require.NotEmpty(t, instance)
 
 		if !moreResults {
 			break
 		}
 	}
-
-	require.NoError(t, mi.Operation_Close(operation))
-
-	operation, err = mi.Session_QueryInstances(session, mi.OperationFlagsNoRTTI, mi.NamespaceRootCIMv2, mi.QueryDialectWQL,
-		"SELECT Architecture, DeviceId, Description, Family, L2CacheSize, L3CacheSize, Name, ThreadCount, NumberOfCores, NumberOfEnabledCore, NumberOfLogicalProcessors FROM Win32_Processor")
-
-	require.NoError(t, err)
-	require.NotEmpty(t, operation)
-
-	/*
-		operation, err := mi.Session_QueryInstances(session, mi.OperationFlagsNoRTTI, mi.NamespaceRootCIMv2, mi.QueryDialectWQL,
-			"SELECT *")
-
-		require.NoError(t, err)
-		require.NotEmpty(t, operation)
-	*/
 }

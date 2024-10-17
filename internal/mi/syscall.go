@@ -133,7 +133,6 @@ func Session_QueryInstances(session *Session, flags OperationFlags, namespaceNam
 	operation := &Operation{}
 
 	callbacks := &OperationCallbacks{
-
 		writeMessage: syscall.NewCallback(func(operation *Operation, ctx uintptr, channel uint32, msg *uint16) uintptr {
 			log.Printf("writeMessage: %s\n", windows.UTF16PtrToString(msg))
 
@@ -146,8 +145,9 @@ func Session_QueryInstances(session *Session, flags OperationFlags, namespaceNam
 		}),
 	}
 
-	r0, _, _ := syscall.SyscallN(
+	_, _, _ = syscall.SyscallN(
 		session.ft.QueryInstances,
+		uintptr(unsafe.Pointer(session)),
 		uintptr(unsafe.Pointer(&flags)),
 		0,
 		uintptr(unsafe.Pointer(namespaceName)),
@@ -156,10 +156,6 @@ func Session_QueryInstances(session *Session, flags OperationFlags, namespaceNam
 		uintptr(unsafe.Pointer(callbacks)),
 		uintptr(unsafe.Pointer(operation)),
 	)
-
-	if result := Result(r0); !errors.Is(result, MI_RESULT_OK) {
-		return nil, result
-	}
 
 	return operation, nil
 }
@@ -192,8 +188,8 @@ func Operation_GetInstance(operation *Operation) (*Instance, bool, error) {
 		return nil, false, errors.New("operation is not initialized")
 	}
 
-	var instance *Instance
-	var completionDetails *Instance
+	instance := &Instance{}
+	completionDetails := &Instance{}
 
 	var (
 		moreResults       uint8
@@ -201,7 +197,7 @@ func Operation_GetInstance(operation *Operation) (*Instance, bool, error) {
 		errorMessageUTF16 *uint16
 	)
 
-	_, _, _ = syscall.SyscallN(
+	_, _, err := syscall.SyscallN(
 		operation.ft.GetInstance,
 		uintptr(unsafe.Pointer(operation)),
 		uintptr(unsafe.Pointer(&instance)),
@@ -216,11 +212,13 @@ func Operation_GetInstance(operation *Operation) (*Instance, bool, error) {
 	// 	mi.Instance_GetElement(instance, "Name")
 	// }
 
+	_ = err
+
 	if !errors.Is(instanceResult, MI_RESULT_OK) {
 		var detailedError string
 
 		// https://learn.microsoft.com/en-us/previous-versions/cc150671(v=vs.85)
-		if completionDetails.ft != nil {
+		if completionDetails != nil && completionDetails.ft != nil {
 			className, err := Instance_GetClassName(completionDetails)
 			count, err := Instance_GetElementCount(completionDetails)
 			if count > 0 && err == nil {
@@ -271,7 +269,7 @@ func Operation_GetClass(operation *Operation) (*Class, bool, error) {
 		var detailedError string
 
 		// https://learn.microsoft.com/en-us/previous-versions/cc150671(v=vs.85)
-		if completionDetails.ft != nil {
+		if completionDetails != nil && completionDetails.ft != nil {
 			className, err := Instance_GetClassName(completionDetails)
 			count, err := Instance_GetElementCount(completionDetails)
 			if count > 0 && err == nil {
@@ -363,6 +361,5 @@ func Instance_GetClassName(instance *Instance) (string, error) {
 	if result := Result(r0); !errors.Is(result, MI_RESULT_OK) {
 		return "", result
 	}
-
 	return windows.UTF16PtrToString(classNameUTF16), nil
 }
