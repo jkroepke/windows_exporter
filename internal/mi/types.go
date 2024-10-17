@@ -216,7 +216,7 @@ type OperationFT struct {
 
 type Instance struct {
 	ft         *InstanceFT
-	classDecl  uintptr
+	classDecl  *ClassDecl
 	serverName *uint16
 	nameSpace  *uint16
 	_          [4]int64

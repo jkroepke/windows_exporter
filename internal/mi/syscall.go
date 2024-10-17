@@ -188,16 +188,15 @@ func Operation_GetInstance(operation *Operation) (*Instance, bool, error) {
 		return nil, false, errors.New("operation is not initialized")
 	}
 
-	instance := &Instance{}
-	completionDetails := &Instance{}
-
 	var (
+		instance          *Instance
+		completionDetails *Instance
 		moreResults       uint8
 		instanceResult    Result
 		errorMessageUTF16 *uint16
 	)
 
-	_, _, err := syscall.SyscallN(
+	_, _, _ = syscall.SyscallN(
 		operation.ft.GetInstance,
 		uintptr(unsafe.Pointer(operation)),
 		uintptr(unsafe.Pointer(&instance)),
@@ -212,22 +211,14 @@ func Operation_GetInstance(operation *Operation) (*Instance, bool, error) {
 	// 	mi.Instance_GetElement(instance, "Name")
 	// }
 
-	_ = err
-
 	if !errors.Is(instanceResult, MI_RESULT_OK) {
 		var detailedError string
 
 		// https://learn.microsoft.com/en-us/previous-versions/cc150671(v=vs.85)
 		if completionDetails != nil && completionDetails.ft != nil {
-			className, err := Instance_GetClassName(completionDetails)
-			count, err := Instance_GetElementCount(completionDetails)
-			if count > 0 && err == nil {
-				if element, err := Instance_GetElement(completionDetails, "Message"); err == nil {
-					detailedError, _ = element.String()
-				}
+			if element, err := Instance_GetClassName(completionDetails); err == nil {
+				detailedError = fmt.Sprintf("class: %s", element)
 			}
-
-			_ = className
 		}
 
 		return nil, false, fmt.Errorf("instance result: %w (%s; %s)", instanceResult, windows.UTF16PtrToString(errorMessageUTF16), detailedError)
@@ -297,8 +288,8 @@ func Instance_GetElement(instance *Instance, elementName string) (*Element, erro
 		return nil, err
 	}
 
-	value := &Value{}
 	var (
+		value      Value
 		valueType  ValueType
 		valueFlags uint32
 		valueIndex uint32
@@ -308,7 +299,7 @@ func Instance_GetElement(instance *Instance, elementName string) (*Element, erro
 		instance.ft.GetElement,
 		uintptr(unsafe.Pointer(instance)),
 		uintptr(unsafe.Pointer(elementNameUTF16)),
-		uintptr(unsafe.Pointer(value)),
+		uintptr(unsafe.Pointer(&value)),
 		uintptr(unsafe.Pointer(&valueType)),
 		uintptr(unsafe.Pointer(&valueFlags)),
 		uintptr(unsafe.Pointer(&valueIndex)),
@@ -352,8 +343,8 @@ func Instance_GetClassName(instance *Instance) (string, error) {
 
 	var classNameUTF16 *uint16
 
-	r0, _, _ := syscall.SyscallN(
-		instance.ft.GetElementCount,
+	r0, _, err := syscall.SyscallN(
+		instance.ft.GetClassName,
 		uintptr(unsafe.Pointer(instance)),
 		uintptr(unsafe.Pointer(&classNameUTF16)),
 	)
@@ -361,5 +352,8 @@ func Instance_GetClassName(instance *Instance) (string, error) {
 	if result := Result(r0); !errors.Is(result, MI_RESULT_OK) {
 		return "", result
 	}
+
+	_ = err
+
 	return windows.UTF16PtrToString(classNameUTF16), nil
 }
