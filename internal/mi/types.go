@@ -265,7 +265,7 @@ type ClassDecl struct {
 	name           *uint16
 	Mqualifiers    uintptr
 	numQualifiers  uint32
-	Mproperties    []*PropertyDecl
+	Mproperties    [][]PropertyDecl
 	numProperties  uint32
 	size           uint32
 	superClass     *uint16
@@ -297,7 +297,7 @@ type PropertyDecl struct {
 	offset        uint32
 	origin        *uint16
 	propagator    *uint16
-	value         uintptr
+	value         interface{}
 }
 
 type Class struct {
@@ -334,99 +334,70 @@ type Element struct {
 }
 
 type Value struct {
-	boolean  uint8
-	uint8    uint8
-	sint8    int8
-	uint16   uint16
-	sint16   int16
-	uint32   uint32
-	sint32   int32
-	uint64   uint64
-	sint64   int64
-	real32   float32
-	real64   float64
-	char16   uint16
-	datetime struct {
-		isTimestamp uint32
-		u           struct {
-			timestamp Timestamp
-			interval  Interval
-		}
-	}
-	string    *uint16
-	instance  *Instance
-	reference *Instance
-	booleana  struct {
-		data uintptr
-		size uint32
-	}
-	uint8a struct {
-		data uintptr
-		size uint32
-	}
-	sint8a struct {
-		data uintptr
-		size uint32
-	}
-	uint16a struct {
-		data uintptr
-		size uint32
-	}
-	sint16a struct {
-		data uintptr
-		size uint32
-	}
-	uint32a struct {
-		data uintptr
-		size uint32
-	}
-	sint32a struct {
-		data uintptr
-		size uint32
-	}
-	uint64a struct {
-		data uintptr
-		size uint32
-	}
-	sint64a struct {
-		data uintptr
-		size uint32
-	}
-	real32a struct {
-		data uintptr
-		size uint32
-	}
-	real64a struct {
-		data uintptr
-		size uint32
-	}
-	char16a struct {
-		data uintptr
-		size uint32
-	}
-	datetimea struct {
-		data uintptr
-		size uint32
-	}
-	stringa struct {
-		data uintptr
-		size uint32
-	}
-	referencea struct {
-		data **Instance
-		size uint32
-	}
-	instancea struct {
-		data **Instance
-		size uint32
-	}
-	array struct {
-		data []byte
-		size uint32
-	}
+	Boolean    *bool
+	Uint8      *uint8
+	Sint8      *int8
+	Uint16     *uint16
+	Sint16     *int16
+	Uint32     *uint32
+	Sint32     *int32
+	Uint64     *uint64
+	Sint64     *int64
+	Real32     *float32
+	Real64     *float64
+	Char16     *uint16 // assuming MI_Char16 is a uint16 representation
+	Datetime   *Datetime
+	String     *string
+	Instance   *Instance
+	Reference  *Instance
+	BooleanA   []bool
+	Uint8A     []uint8
+	Sint8A     []int8
+	Uint16A    []uint16
+	Sint16A    []int16
+	Uint32A    []uint32
+	Sint32A    []int32
+	Uint64A    []uint64
+	Sint64A    []int64
+	Real32A    []float32
+	Real64A    []float64
+	Char16A    []uint16 // assuming MI_Char16A is an array of uint16
+	DatetimeA  []Datetime
+	StringA    []string
+	ReferenceA []Instance
+	InstanceA  []Instance
+	Array      []interface{} // Generic array for dynamic types
 }
 
-type ValueType uint32
+type Timestamp struct {
+	Year         uint32
+	Month        uint32
+	Day          uint32
+	Hour         uint32
+	Minute       uint32
+	Second       uint32
+	Microseconds uint32
+	UTC          int32
+}
+
+type Interval struct {
+	Days         uint32
+	Hours        uint32
+	Minutes      uint32
+	Seconds      uint32
+	Microseconds uint32
+	Padding1     uint32
+	Padding2     uint32
+	Padding3     uint32
+}
+
+type Datetime struct {
+	IsTimestamp bool
+	Timestamp   *Timestamp // Used when IsTimestamp is true
+	Interval    *Interval  // Used when IsTimestamp is false
+}
+
+type ValueType int
 
 const (
 	ValueTypeBOOLEAN    = 0
@@ -463,25 +434,3 @@ const (
 	ValueTypeINSTANCEA  = 31
 	ValueTypeARRAY      = 16
 )
-
-type Timestamp struct {
-	year         uint32
-	month        uint32
-	day          uint32
-	hour         uint32
-	minute       uint32
-	second       uint32
-	microseconds uint32
-	utc          int32
-}
-
-type Interval struct {
-	days         uint32
-	hours        uint32
-	minutes      uint32
-	seconds      uint32
-	microseconds uint32
-	__padding1   uint32
-	__padding2   uint32
-	__padding3   uint32
-}

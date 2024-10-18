@@ -3,7 +3,6 @@ package mi
 import (
 	"errors"
 	"fmt"
-	"log"
 	"syscall"
 	"unsafe"
 
@@ -82,31 +81,28 @@ func Application_NewSession(application *Application, protocol Protocol) (*Sessi
 
 	session := &Session{}
 
-	callbacks := &SessionCallbacks{
-		writeMessage: syscall.NewCallback(func(app *Application, ctx uintptr, channel uint32, msg *uint16) uintptr {
-			log.Printf("writeMessage: %s", windows.UTF16PtrToString(msg))
+	/*
+		callbacks := &SessionCallbacks{
+			writeMessage: syscall.NewCallback(func(app *Application, ctx uintptr, channel uint32, msg *uint16) uintptr {
+				log.Printf("writeMessage: %s", windows.UTF16PtrToString(msg))
 
-			return 0
-		}),
-		writeError: syscall.NewCallback(func(app *Application, ctx uintptr, instance uintptr) uintptr {
-			log.Printf("writeError: %v\n", instance)
+				return 0
+			}),
+			writeError: syscall.NewCallback(func(app *Application, ctx uintptr, instance uintptr) uintptr {
+				log.Printf("writeError: %v\n", instance)
 
-			return 0
-		}),
-	}
-
-	localhost, err := windows.UTF16PtrFromString("localhost")
-	if err != nil {
-		return nil, err
-	}
+				return 0
+			}),
+		}
+	*/
 
 	r0, _, _ := syscall.SyscallN(
 		application.ft.NewSession,
 		uintptr(unsafe.Pointer(application)),
-		uintptr(unsafe.Pointer(protocol)),
-		uintptr(unsafe.Pointer(localhost)),
 		0,
-		uintptr(unsafe.Pointer(callbacks)),
+		0,
+		0,
+		0,
 		0,
 		uintptr(unsafe.Pointer(session)),
 	)
@@ -131,29 +127,15 @@ func Session_QueryInstances(session *Session, flags OperationFlags, namespaceNam
 	}
 
 	operation := &Operation{}
-
-	callbacks := &OperationCallbacks{
-		writeMessage: syscall.NewCallback(func(operation *Operation, ctx uintptr, channel uint32, msg *uint16) uintptr {
-			log.Printf("writeMessage: %s\n", windows.UTF16PtrToString(msg))
-
-			return 0
-		}),
-		writeError: syscall.NewCallback(func(operation *Operation, ctx uintptr, instance *Instance) uintptr {
-			log.Printf("writeError: %v\n", instance)
-
-			return 0
-		}),
-	}
-
 	_, _, _ = syscall.SyscallN(
 		session.ft.QueryInstances,
 		uintptr(unsafe.Pointer(session)),
-		uintptr(unsafe.Pointer(&flags)),
+		0,
 		0,
 		uintptr(unsafe.Pointer(namespaceName)),
 		uintptr(unsafe.Pointer(queryDialect)),
 		uintptr(unsafe.Pointer(queryExpressionUTF16)),
-		uintptr(unsafe.Pointer(callbacks)),
+		0,
 		uintptr(unsafe.Pointer(operation)),
 	)
 
@@ -196,7 +178,7 @@ func Operation_GetInstance(operation *Operation) (*Instance, bool, error) {
 		errorMessageUTF16 *uint16
 	)
 
-	_, _, _ = syscall.SyscallN(
+	r0, _, _ := syscall.SyscallN(
 		operation.ft.GetInstance,
 		uintptr(unsafe.Pointer(operation)),
 		uintptr(unsafe.Pointer(&instance)),
@@ -211,71 +193,25 @@ func Operation_GetInstance(operation *Operation) (*Instance, bool, error) {
 	// 	mi.Instance_GetElement(instance, "Name")
 	// }
 
+	if result := Result(r0); !errors.Is(result, MI_RESULT_OK) {
+		instanceResult = result
+	}
+
 	if !errors.Is(instanceResult, MI_RESULT_OK) {
-		var detailedError string
+		/*
+			var detailedError string
 
-		// https://learn.microsoft.com/en-us/previous-versions/cc150671(v=vs.85)
-		if completionDetails != nil && completionDetails.ft != nil {
-			if element, err := Instance_GetClassName(completionDetails); err == nil {
-				detailedError = fmt.Sprintf("class: %s", element)
+			// https://learn.microsoft.com/en-us/previous-versions/cc150671(v=vs.85)
+			if completionDetails != nil && completionDetails.ft != nil {
+				if element, err := Instance_GetElement(completionDetails, "Message"); err == nil {
+					detailedError = fmt.Sprintf("class: %v", element)
+				}
 			}
-		}
-
-		return nil, false, fmt.Errorf("instance result: %w (%s; %s)", instanceResult, windows.UTF16PtrToString(errorMessageUTF16), detailedError)
+		*/
+		return nil, false, fmt.Errorf("instance result: %w (%s)", instanceResult, windows.UTF16PtrToString(errorMessageUTF16))
 	}
 
 	return instance, moreResults != 0, nil
-}
-
-func Operation_GetClass(operation *Operation) (*Class, bool, error) {
-	if operation.ft == nil {
-		return nil, false, errors.New("operation is not initialized")
-	}
-
-	var classResult *Class
-	var completionDetails *Instance
-
-	var (
-		moreResults       uint8
-		instanceResult    Result
-		errorMessageUTF16 *uint16
-	)
-
-	_, _, _ = syscall.SyscallN(
-		operation.ft.GetClass,
-		uintptr(unsafe.Pointer(operation)),
-		uintptr(unsafe.Pointer(&classResult)),
-		uintptr(unsafe.Pointer(&moreResults)),
-		uintptr(unsafe.Pointer(&instanceResult)),
-		uintptr(unsafe.Pointer(&errorMessageUTF16)),
-		uintptr(unsafe.Pointer(&completionDetails)),
-	)
-
-	// TODO: close instance if not needed
-	// if completionDetails.ft != nil {
-	// 	mi.Instance_GetElement(instance, "Name")
-	// }
-
-	if !errors.Is(instanceResult, MI_RESULT_OK) {
-		var detailedError string
-
-		// https://learn.microsoft.com/en-us/previous-versions/cc150671(v=vs.85)
-		if completionDetails != nil && completionDetails.ft != nil {
-			className, err := Instance_GetClassName(completionDetails)
-			count, err := Instance_GetElementCount(completionDetails)
-			if count > 0 && err == nil {
-				if element, err := Instance_GetElement(completionDetails, "Message"); err == nil {
-					detailedError, _ = element.String()
-				}
-			}
-
-			_ = className
-		}
-
-		return nil, false, fmt.Errorf("instance result: %w (%s; %s)", instanceResult, windows.UTF16PtrToString(errorMessageUTF16), detailedError)
-	}
-
-	return classResult, moreResults != 0, nil
 }
 
 func Instance_GetElement(instance *Instance, elementName string) (*Element, error) {
@@ -289,10 +225,8 @@ func Instance_GetElement(instance *Instance, elementName string) (*Element, erro
 	}
 
 	var (
-		value      Value
-		valueType  ValueType
-		valueFlags uint32
-		valueIndex uint32
+		value     Value
+		valueType ValueType
 	)
 
 	r0, _, _ := syscall.SyscallN(
@@ -301,19 +235,15 @@ func Instance_GetElement(instance *Instance, elementName string) (*Element, erro
 		uintptr(unsafe.Pointer(elementNameUTF16)),
 		uintptr(unsafe.Pointer(&value)),
 		uintptr(unsafe.Pointer(&valueType)),
-		uintptr(unsafe.Pointer(&valueFlags)),
-		uintptr(unsafe.Pointer(&valueIndex)),
+		0,
+		0,
 	)
 
 	if result := Result(r0); !errors.Is(result, MI_RESULT_OK) {
 		return nil, result
 	}
 
-	return &Element{
-		value:     nil,
-		flags:     valueFlags,
-		valueType: valueType,
-	}, nil
+	return &Element{}, nil
 }
 
 func Instance_GetElementCount(instance *Instance) (uint32, error) {
