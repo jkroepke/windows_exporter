@@ -28,7 +28,7 @@ func Test_MI_Query(t *testing.T) {
 	require.NotEmpty(t, session)
 
 	operation, err := mi.Session_QueryInstances(session, mi.OperationFlagsNoRTTI, mi.NamespaceRootCIMv2, mi.QueryDialectWQL,
-		"select * from win32_process where handle = 0 or handle = 4")
+		"select Name from win32_process where handle = 0 or handle = 4")
 
 	require.NoError(t, err)
 	require.NotEmpty(t, operation)
@@ -37,6 +37,10 @@ func Test_MI_Query(t *testing.T) {
 		instance, moreResults, err := mi.Operation_GetInstance(operation)
 		require.NoError(t, err)
 		require.NotEmpty(t, instance)
+
+		className, err := mi.Instance_GetClassName(instance)
+		require.NoError(t, err)
+		require.NotEmpty(t, className)
 
 		count, err := mi.Instance_GetElementCount(instance)
 		require.NoError(t, err)

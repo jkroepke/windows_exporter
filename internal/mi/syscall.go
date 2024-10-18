@@ -273,7 +273,7 @@ func Instance_GetClassName(instance *Instance) (string, error) {
 
 	var classNameUTF16 *uint16
 
-	r0, _, err := syscall.SyscallN(
+	r0, _, _ := syscall.SyscallN(
 		instance.ft.GetClassName,
 		uintptr(unsafe.Pointer(instance)),
 		uintptr(unsafe.Pointer(&classNameUTF16)),
@@ -283,7 +283,9 @@ func Instance_GetClassName(instance *Instance) (string, error) {
 		return "", result
 	}
 
-	_ = err
+	if classNameUTF16 == nil {
+		return "", errors.New("class name is nil")
+	}
 
 	return windows.UTF16PtrToString(classNameUTF16), nil
 }
