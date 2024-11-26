@@ -44,7 +44,7 @@ type Collector[T any] struct {
 	mu                    sync.RWMutex
 
 	NameFieldIndex   []int
-	requestCollectCh chan []T
+	requestCollectCh chan *[]T
 	resultCollectCh  chan error
 }
 
@@ -85,13 +85,19 @@ func NewCollector[T any](object string, instances []string) (*Collector[T], erro
 	errs := make([]error, 0, tt.NumField())
 
 	for _, field := range reflect.VisibleFields(tt) {
-		counterName, ok := field.Tag.Lookup("pdh")
-		if !ok {
+		if field.Name == "Name" {
+			if field.Type.Kind() != reflect.String {
+				return nil, errors.New("name field must be a string")
+			}
+
+			collector.NameFieldIndex = field.Index
+
 			continue
 		}
 
-		if field.Name == "Name" {
-			collector.NameFieldIndex = field.Index
+		counterName, ok := field.Tag.Lookup("pdh")
+		if !ok {
+			continue
 		}
 
 		if counterName == "*" {
@@ -163,14 +169,14 @@ func NewCollector[T any](object string, instances []string) (*Collector[T], erro
 		return nil, errors.New("no counters configured")
 	}
 
-	collector.requestCollectCh = make(chan []T)
+	collector.requestCollectCh = make(chan *[]T)
 	collector.resultCollectCh = make(chan error)
 
 	go collector.collectRoutine()
 
 	counterValues := make([]T, 0)
 
-	if err := collector.Collect(counterValues); err != nil && !errors.Is(err, ErrNoData) {
+	if err := collector.Collect(&counterValues); err != nil && !errors.Is(err, ErrNoData) {
 		return collector, fmt.Errorf("failed to collect initial data: %w", err)
 	}
 
@@ -194,13 +200,13 @@ func (c *Collector[T]) Describe() map[string]string {
 	return desc
 }
 
-func (c *Collector[T]) Collect(values []T) error {
+func (c *Collector[T]) Collect(values *[]T) error {
 	if c == nil {
 		return ErrPerformanceCounterNotInitialized
 	}
 
 	if values == nil {
-		values = make([]T, 0)
+		values = &[]T{}
 	}
 
 	c.mu.RLock()
@@ -216,15 +222,17 @@ func (c *Collector[T]) Collect(values []T) error {
 }
 
 func (c *Collector[T]) collectRoutine() {
-	buf := make([]byte, 0)
+	buf := make([]byte, 1)
 
 	// Get the info with the current buffer size
 	var (
 		bytesNeeded uint32
 		itemCount   uint32
+
+		instanceIndex int
 	)
 
-	for values := range c.requestCollectCh {
+	for counterValues := range c.requestCollectCh {
 		if ret := PdhCollectQueryData(c.handle); ret != ErrorSuccess {
 			c.resultCollectCh <- fmt.Errorf("failed to collect query data: %w", NewPdhError(ret))
 
@@ -233,8 +241,10 @@ func (c *Collector[T]) collectRoutine() {
 
 		err := (func() error {
 			// Clear the values slice
-			clear(values)
-			values = values[:0]
+			clear(*counterValues)
+			*counterValues = (*counterValues)[:0]
+
+			var instanceIndexLookup map[string]int
 
 			for _, counter := range c.counters {
 				for _, instance := range counter.Instances {
@@ -269,11 +279,15 @@ func (c *Collector[T]) collectRoutine() {
 						metricType = prometheus.GaugeValue
 					}
 
-					if len(values) == 0 {
-						values = make([]T, len(items))
+					if cap(*counterValues) < len(items) {
+						*counterValues = make([]T, 0, len(items))
 					}
 
-					for instanceIndex, item := range items {
+					if len(instanceIndexLookup) == 0 {
+						instanceIndexLookup = make(map[string]int, len(items))
+					}
+
+					for _, item := range items {
 						if item.RawValue.CStatus == PdhCstatusValidData || item.RawValue.CStatus == PdhCstatusNewData {
 							instanceName := windows.UTF16PtrToString(item.SzName)
 							if strings.HasSuffix(instanceName, InstanceTotal) && !c.totalCounterRequested {
@@ -282,6 +296,33 @@ func (c *Collector[T]) collectRoutine() {
 
 							if instanceName == "" || instanceName == "*" {
 								instanceName = InstanceEmpty
+							}
+
+							var value reflect.Value
+
+							if val, ok := instanceIndexLookup[instanceName]; ok {
+								instanceIndex = val
+
+								value = reflect.ValueOf(&(*counterValues)[instanceIndex]).Elem()
+							} else {
+								instanceIndex = len(*counterValues)
+								instanceIndexLookup[instanceName] = instanceIndex
+
+								var counterValue T
+
+								*counterValues = append(*counterValues, counterValue)
+
+								value = reflect.ValueOf(&(*counterValues)[instanceIndex]).Elem()
+
+								if c.NameFieldIndex != nil {
+									// nameField := value.FieldByName("Name")
+									nameField, err := value.FieldByIndexErr(c.NameFieldIndex)
+									if err != nil {
+										return fmt.Errorf("failed to get name field by index: %w", err)
+									}
+
+									nameField.SetString(instanceName)
+								}
 							}
 
 							counterValue := CounterValue{
@@ -304,21 +345,12 @@ func (c *Collector[T]) collectRoutine() {
 								counterValue.FirstValue = float64(item.RawValue.FirstValue)
 							}
 
-							value := reflect.ValueOf(values[instanceIndex]).Elem()
-
 							field, err := value.FieldByIndexErr(counter.FieldIndex)
 							if err != nil {
 								return fmt.Errorf("failed to get field by index: %w", err)
 							}
 
 							field.Set(reflect.ValueOf(counterValue))
-
-							nameField, err := value.FieldByIndexErr(c.NameFieldIndex)
-							if err != nil {
-								return fmt.Errorf("failed to get name field by index: %w", err)
-							}
-
-							nameField.SetString(instanceName)
 						}
 					}
 				}
@@ -327,7 +359,7 @@ func (c *Collector[T]) collectRoutine() {
 			return nil
 		})()
 
-		if err == nil && len(values) == 0 {
+		if err == nil && len(*counterValues) == 0 {
 			err = ErrNoData
 		}
 
@@ -335,7 +367,7 @@ func (c *Collector[T]) collectRoutine() {
 	}
 }
 
-func (c *Collector) Close() {
+func (c *Collector[T]) Close() {
 	if c == nil {
 		return
 	}
@@ -349,11 +381,9 @@ func (c *Collector) Close() {
 
 	close(c.requestCollectCh)
 	close(c.resultCollectCh)
-	close(c.errorCh)
 
 	c.resultCollectCh = nil
 	c.requestCollectCh = nil
-	c.errorCh = nil
 }
 
 func formatCounterPath(object, instance, counterName string) string {

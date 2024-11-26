@@ -23,7 +23,7 @@ import (
 )
 
 type Process struct {
-	Name                    perfdata.CounterValue `pdh:"Name"`
+	Name                    string
 	ProcessorTime           perfdata.CounterValue `pdh:"% Processor Time"`
 	PrivilegedTime          perfdata.CounterValue `pdh:"% Privileged Time"`
 	UserTime                perfdata.CounterValue `pdh:"% User Time"`
@@ -61,7 +61,7 @@ func BenchmarkTestCollector(b *testing.B) {
 	processes := make([]Process, 0)
 
 	for i := 0; i < b.N; i++ {
-		_ = performanceData.Collect(processes)
+		_ = performanceData.Collect(&processes)
 	}
 
 	performanceData.Close()

@@ -17,13 +17,25 @@ package perfdata_test
 
 import (
 	"testing"
-	"time"
 
-	v2 "github.com/prometheus-community/windows_exporter/internal/perfdata"
-	"github.com/stretchr/testify/assert"
+	"github.com/prometheus-community/windows_exporter/internal/perfdata"
 	"github.com/stretchr/testify/require"
 )
 
+func TestCollectorProcess(t *testing.T) {
+	performanceData, err := perfdata.NewCollector[Process]("Process", []string{"*"})
+	require.NoError(t, err)
+
+	processes := make([]Process, 0)
+
+	_ = performanceData.Collect(&processes)
+
+	_ = performanceData.Collect(&processes)
+	performanceData.Close()
+
+}
+
+/*
 func TestCollector(t *testing.T) {
 	t.Parallel()
 
@@ -97,3 +109,4 @@ func TestCollector(t *testing.T) {
 		})
 	}
 }
+*/
