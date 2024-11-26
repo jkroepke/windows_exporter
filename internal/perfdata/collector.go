@@ -18,6 +18,7 @@ package perfdata
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -35,27 +36,28 @@ var (
 
 type CounterValues = map[string]map[string]CounterValue
 
-type Collector struct {
+type Collector[T any] struct {
 	object                string
 	counters              map[string]Counter
 	handle                pdhQueryHandle
 	totalCounterRequested bool
 	mu                    sync.RWMutex
 
-	collectCh       chan struct{}
-	counterValuesCh chan CounterValues
-	errorCh         chan error
+	NameFieldIndex   []int
+	requestCollectCh chan []T
+	resultCollectCh  chan error
 }
 
 type Counter struct {
-	Name      string
-	Desc      string
-	Instances map[string]pdhCounterHandle
-	Type      uint32
-	Frequency int64
+	Name       string
+	FieldIndex []int
+	Desc       string
+	Instances  map[string]pdhCounterHandle
+	Type       uint32
+	Frequency  int64
 }
 
-func NewCollector(object string, instances []string, counters []string) (*Collector, error) {
+func NewCollector[T any](object string, instances []string) (*Collector[T], error) {
 	var handle pdhQueryHandle
 
 	if ret := PdhOpenQuery(0, 0, &handle); ret != ErrorSuccess {
@@ -66,24 +68,40 @@ func NewCollector(object string, instances []string, counters []string) (*Collec
 		instances = []string{InstanceEmpty}
 	}
 
-	collector := &Collector{
+	var zero [0]T
+	tt := reflect.TypeOf(zero).Elem()
+	if tt.Kind() != reflect.Struct {
+		return nil, errors.New("T must be a struct")
+	}
+
+	collector := &Collector[T]{
 		object:                object,
-		counters:              make(map[string]Counter, len(counters)),
+		counters:              make(map[string]Counter, tt.NumField()),
 		handle:                handle,
 		totalCounterRequested: slices.Contains(instances, InstanceTotal),
 		mu:                    sync.RWMutex{},
 	}
 
-	errs := make([]error, 0, len(counters))
+	errs := make([]error, 0, tt.NumField())
 
-	for _, counterName := range counters {
+	for _, field := range reflect.VisibleFields(tt) {
+		counterName, ok := field.Tag.Lookup("pdh")
+		if !ok {
+			continue
+		}
+
+		if field.Name == "Name" {
+			collector.NameFieldIndex = field.Index
+		}
+
 		if counterName == "*" {
 			return nil, errors.New("wildcard counters are not supported")
 		}
 
 		counter := Counter{
-			Name:      counterName,
-			Instances: make(map[string]pdhCounterHandle, len(instances)),
+			Name:       counterName,
+			FieldIndex: field.Index,
+			Instances:  make(map[string]pdhCounterHandle, len(instances)),
 		}
 
 		var counterPath string
@@ -145,20 +163,21 @@ func NewCollector(object string, instances []string, counters []string) (*Collec
 		return nil, errors.New("no counters configured")
 	}
 
-	collector.collectCh = make(chan struct{})
-	collector.counterValuesCh = make(chan CounterValues)
-	collector.errorCh = make(chan error)
+	collector.requestCollectCh = make(chan []T)
+	collector.resultCollectCh = make(chan error)
 
 	go collector.collectRoutine()
 
-	if _, err := collector.Collect(); err != nil && !errors.Is(err, ErrNoData) {
+	counterValues := make([]T, 0)
+
+	if err := collector.Collect(counterValues); err != nil && !errors.Is(err, ErrNoData) {
 		return collector, fmt.Errorf("failed to collect initial data: %w", err)
 	}
 
 	return collector, nil
 }
 
-func (c *Collector) Describe() map[string]string {
+func (c *Collector[T]) Describe() map[string]string {
 	if c == nil {
 		return map[string]string{}
 	}
@@ -175,64 +194,73 @@ func (c *Collector) Describe() map[string]string {
 	return desc
 }
 
-func (c *Collector) Collect() (CounterValues, error) {
+func (c *Collector[T]) Collect(values []T) error {
 	if c == nil {
-		return CounterValues{}, ErrPerformanceCounterNotInitialized
+		return ErrPerformanceCounterNotInitialized
+	}
+
+	if values == nil {
+		values = make([]T, 0)
 	}
 
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if len(c.counters) == 0 || c.handle == 0 || c.collectCh == nil || c.counterValuesCh == nil || c.errorCh == nil {
-		return nil, ErrPerformanceCounterNotInitialized
+	if len(c.counters) == 0 || c.handle == 0 || c.requestCollectCh == nil || c.resultCollectCh == nil {
+		return ErrPerformanceCounterNotInitialized
 	}
 
-	c.collectCh <- struct{}{}
+	c.requestCollectCh <- values
 
-	return <-c.counterValuesCh, <-c.errorCh
+	return <-c.resultCollectCh
 }
 
-func (c *Collector) collectRoutine() {
-	for range c.collectCh {
+func (c *Collector[T]) collectRoutine() {
+	buf := make([]byte, 0)
+
+	// Get the info with the current buffer size
+	var (
+		bytesNeeded uint32
+		itemCount   uint32
+	)
+
+	for values := range c.requestCollectCh {
 		if ret := PdhCollectQueryData(c.handle); ret != ErrorSuccess {
-			c.counterValuesCh <- nil
-			c.errorCh <- fmt.Errorf("failed to collect query data: %w", NewPdhError(ret))
+			c.resultCollectCh <- fmt.Errorf("failed to collect query data: %w", NewPdhError(ret))
 
 			continue
 		}
 
-		counterValues, err := (func() (CounterValues, error) {
-			var data CounterValues
+		err := (func() error {
+			// Clear the values slice
+			clear(values)
+			values = values[:0]
 
 			for _, counter := range c.counters {
 				for _, instance := range counter.Instances {
 					// Get the info with the current buffer size
-					var itemCount uint32
+					bytesNeeded = uint32(cap(buf))
+					itemCount = 0
 
-					// Get the info with the current buffer size
-					bufLen := uint32(0)
+					for {
+						ret := PdhGetRawCounterArray(instance, &bytesNeeded, &itemCount, &buf[0])
 
-					ret := PdhGetRawCounterArray(instance, &bufLen, &itemCount, nil)
-					if ret != PdhMoreData {
-						return nil, fmt.Errorf("PdhGetRawCounterArray: %w", NewPdhError(ret))
-					}
-
-					buf := make([]byte, bufLen)
-
-					ret = PdhGetRawCounterArray(instance, &bufLen, &itemCount, &buf[0])
-					if ret != ErrorSuccess {
-						if err := NewPdhError(ret); !isKnownCounterDataError(err) {
-							return nil, fmt.Errorf("PdhGetRawCounterArray: %w", err)
+						if ret == ErrorSuccess {
+							break
 						}
 
-						continue
+						if err := NewPdhError(ret); ret != PdhMoreData && !isKnownCounterDataError(err) {
+							return fmt.Errorf("PdhGetRawCounterArray: %w", err)
+						}
+
+						if bytesNeeded <= uint32(cap(buf)) {
+							return fmt.Errorf("PdhGetRawCounterArray reports buffer too small (%d), but buffer is large enough (%d): %w", uint32(cap(buf)), bytesNeeded, NewPdhError(ret))
+						}
+
+						buf = make([]byte, bytesNeeded)
 					}
 
 					items := unsafe.Slice((*PdhRawCounterItem)(unsafe.Pointer(&buf[0])), itemCount)
-
-					if data == nil {
-						data = make(CounterValues, itemCount)
-					}
 
 					var metricType prometheus.ValueType
 					if val, ok := supportedCounterTypes[counter.Type]; ok {
@@ -241,7 +269,11 @@ func (c *Collector) collectRoutine() {
 						metricType = prometheus.GaugeValue
 					}
 
-					for _, item := range items {
+					if len(values) == 0 {
+						values = make([]T, len(items))
+					}
+
+					for instanceIndex, item := range items {
 						if item.RawValue.CStatus == PdhCstatusValidData || item.RawValue.CStatus == PdhCstatusNewData {
 							instanceName := windows.UTF16PtrToString(item.SzName)
 							if strings.HasSuffix(instanceName, InstanceTotal) && !c.totalCounterRequested {
@@ -252,11 +284,7 @@ func (c *Collector) collectRoutine() {
 								instanceName = InstanceEmpty
 							}
 
-							if _, ok := data[instanceName]; !ok {
-								data[instanceName] = make(map[string]CounterValue, len(c.counters))
-							}
-
-							values := CounterValue{
+							counterValue := CounterValue{
 								Type: metricType,
 							}
 
@@ -266,31 +294,44 @@ func (c *Collector) collectRoutine() {
 
 							switch counter.Type {
 							case PERF_ELAPSED_TIME:
-								values.FirstValue = float64((item.RawValue.FirstValue - WindowsEpoch) / counter.Frequency)
+								counterValue.FirstValue = float64((item.RawValue.FirstValue - WindowsEpoch) / counter.Frequency)
 							case PERF_100NSEC_TIMER, PERF_PRECISION_100NS_TIMER:
-								values.FirstValue = float64(item.RawValue.FirstValue) * TicksToSecondScaleFactor
+								counterValue.FirstValue = float64(item.RawValue.FirstValue) * TicksToSecondScaleFactor
 							case PERF_AVERAGE_BULK, PERF_RAW_FRACTION:
-								values.FirstValue = float64(item.RawValue.FirstValue)
-								values.SecondValue = float64(item.RawValue.SecondValue)
+								counterValue.FirstValue = float64(item.RawValue.FirstValue)
+								counterValue.SecondValue = float64(item.RawValue.SecondValue)
 							default:
-								values.FirstValue = float64(item.RawValue.FirstValue)
+								counterValue.FirstValue = float64(item.RawValue.FirstValue)
 							}
 
-							data[instanceName][counter.Name] = values
+							value := reflect.ValueOf(values[instanceIndex]).Elem()
+
+							field, err := value.FieldByIndexErr(counter.FieldIndex)
+							if err != nil {
+								return fmt.Errorf("failed to get field by index: %w", err)
+							}
+
+							field.Set(reflect.ValueOf(counterValue))
+
+							nameField, err := value.FieldByIndexErr(c.NameFieldIndex)
+							if err != nil {
+								return fmt.Errorf("failed to get name field by index: %w", err)
+							}
+
+							nameField.SetString(instanceName)
 						}
 					}
 				}
 			}
 
-			return data, nil
+			return nil
 		})()
 
-		if err == nil && len(counterValues) == 0 {
+		if err == nil && len(values) == 0 {
 			err = ErrNoData
 		}
 
-		c.counterValuesCh <- counterValues
-		c.errorCh <- err
+		c.resultCollectCh <- err
 	}
 }
 
@@ -306,12 +347,12 @@ func (c *Collector) Close() {
 
 	c.handle = 0
 
-	close(c.collectCh)
-	close(c.counterValuesCh)
+	close(c.requestCollectCh)
+	close(c.resultCollectCh)
 	close(c.errorCh)
 
-	c.counterValuesCh = nil
-	c.collectCh = nil
+	c.resultCollectCh = nil
+	c.requestCollectCh = nil
 	c.errorCh = nil
 }
 
