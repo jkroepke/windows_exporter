@@ -25,7 +25,7 @@ import (
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/prometheus-community/windows_exporter/internal/mi"
-	"github.com/prometheus-community/windows_exporter/internal/perfdata"
+	"github.com/prometheus-community/windows_exporter/internal/pdh"
 	"github.com/prometheus-community/windows_exporter/internal/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"gopkg.in/yaml.v3"
@@ -171,7 +171,7 @@ func (c *Collector) Build(logger *slog.Logger, _ *mi.Session) error {
 			counters = append(counters, counter.Name)
 		}
 
-		collector, err := perfdata.NewCollector(object.Object, object.Instances, counters)
+		collector, err := pdh.NewCollector(object.Object, object.Instances, counters)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("failed collector for %s: %w", object.Name, err))
 		}
@@ -260,7 +260,7 @@ func (c *Collector) collectObject(ch chan<- prometheus.Metric, perfDataObject Ob
 
 			labels := make(prometheus.Labels, len(counter.Labels)+1)
 
-			if collectedInstance != perfdata.InstanceEmpty {
+			if collectedInstance != pdh.InstanceEmpty {
 				labels[perfDataObject.InstanceLabel] = collectedInstance
 			}
 

@@ -15,7 +15,7 @@
 
 package performancecounter
 
-import "github.com/prometheus-community/windows_exporter/internal/perfdata"
+import "github.com/prometheus-community/windows_exporter/internal/pdh"
 
 type Object struct {
 	Name          string    `json:"name"           yaml:"name"`
@@ -24,7 +24,7 @@ type Object struct {
 	Counters      []Counter `json:"counters"       yaml:"counters"`
 	InstanceLabel string    `json:"instance_label" yaml:"instance_label"` //nolint:tagliatelle
 
-	collector *perfdata.Collector
+	collector *pdh.Collector
 }
 
 type Counter struct {
