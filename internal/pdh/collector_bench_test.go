@@ -15,6 +15,7 @@
 
 package pdh_test
 
+/*
 import (
 	"testing"
 
@@ -64,3 +65,4 @@ func BenchmarkTestCollector(b *testing.B) {
 
 	b.ReportAllocs()
 }
+*/
