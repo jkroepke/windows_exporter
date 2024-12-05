@@ -26,8 +26,8 @@ import (
 
 type process struct {
 	Name        string
-	ThreadCount int `pdh:"Thread Count"`
-	IDProcess   int `pdh:"ID Process"`
+	ThreadCount float64 `pdh:"Thread Count"`
+	IDProcess   float64 `pdh:"ID Process"`
 }
 
 func TestCollector(t *testing.T) {
@@ -53,7 +53,11 @@ func TestCollector(t *testing.T) {
 
 			var data []process
 
-			err = performanceData.Collect(data)
+			err = performanceData.Collect(&data)
+			require.NoError(t, err)
+			require.NotEmpty(t, data)
+
+			err = performanceData.Collect(&data)
 			require.NoError(t, err)
 			require.NotEmpty(t, data)
 

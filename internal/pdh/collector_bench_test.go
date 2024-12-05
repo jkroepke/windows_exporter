@@ -15,54 +15,57 @@
 
 package pdh_test
 
-/*
 import (
 	"testing"
 
-	v2 "github.com/prometheus-community/windows_exporter/internal/pdh"
+	"github.com/prometheus-community/windows_exporter/internal/pdh"
 	"github.com/stretchr/testify/require"
 )
 
+type processFull struct {
+	Name string
+
+	ProcessorTime        float64 `pdh:"% Processor Time"`
+	PrivilegedTime       float64 `pdh:"% Privileged Time"`
+	UserTime             float64 `pdh:"% User Time"`
+	CreatingProcessID    float64 `pdh:"Creating Process ID"`
+	ElapsedTime          float64 `pdh:"Elapsed Time"`
+	HandleCount          float64 `pdh:"Handle Count"`
+	IDProcess            float64 `pdh:"ID Process"`
+	IODataBytesSec       float64 `pdh:"IO Data Bytes/sec"`
+	IODataOperationsSec  float64 `pdh:"IO Data Operations/sec"`
+	IOOtherBytesSec      float64 `pdh:"IO Other Bytes/sec"`
+	IOOtherOperationsSec float64 `pdh:"IO Other Operations/sec"`
+	IOReadBytesSec       float64 `pdh:"IO Read Bytes/sec"`
+	IOReadOperationsSec  float64 `pdh:"IO Read Operations/sec"`
+	IOWriteBytesSec      float64 `pdh:"IO Write Bytes/sec"`
+	IOWriteOperationsSec float64 `pdh:"IO Write Operations/sec"`
+	PageFaultsSec        float64 `pdh:"Page Faults/sec"`
+	PageFileBytesPeak    float64 `pdh:"Page File Bytes Peak"`
+	PageFileBytes        float64 `pdh:"Page File Bytes"`
+	PoolNonpagedBytes    float64 `pdh:"Pool Nonpaged Bytes"`
+	PoolPagedBytes       float64 `pdh:"Pool Paged Bytes"`
+	PriorityBase         float64 `pdh:"Priority Base"`
+	PrivateBytes         float64 `pdh:"Private Bytes"`
+	ThreadCount          float64 `pdh:"Thread Count"`
+	VirtualBytesPeak     float64 `pdh:"Virtual Bytes Peak"`
+	VirtualBytes         float64 `pdh:"Virtual Bytes"`
+	WorkingSetPrivate    float64 `pdh:"Working Set - Private"`
+	WorkingSetPeak       float64 `pdh:"Working Set Peak"`
+	WorkingSet           float64 `pdh:"Working Set"`
+}
+
 func BenchmarkTestCollector(b *testing.B) {
-	counters := []string{
-		"% Processor Time",
-		"% Privileged Time",
-		"% User Time",
-		"Creating Process ID",
-		"Elapsed Time",
-		"Handle Count",
-		"ID Process",
-		"IO Data Bytes/sec",
-		"IO Data Operations/sec",
-		"IO Other Bytes/sec",
-		"IO Other Operations/sec",
-		"IO Read Bytes/sec",
-		"IO Read Operations/sec",
-		"IO Write Bytes/sec",
-		"IO Write Operations/sec",
-		"Page Faults/sec",
-		"Page File Bytes Peak",
-		"Page File Bytes",
-		"Pool Nonpaged Bytes",
-		"Pool Paged Bytes",
-		"Priority Base",
-		"Private Bytes",
-		"Thread Count",
-		"Virtual Bytes Peak",
-		"Virtual Bytes",
-		"Working Set - Private",
-		"Working Set Peak",
-		"Working Set",
-	}
-	performanceData, err := v2.NewCollector("Process", []string{"*"}, counters)
+	performanceData, err := pdh.NewCollector[processFull]("Process", []string{"*"})
 	require.NoError(b, err)
 
+	var data []processFull
+
 	for i := 0; i < b.N; i++ {
-		_, _ = performanceData.Collect()
+		_ = performanceData.Collect(&data)
 	}
 
 	performanceData.Close()
 
 	b.ReportAllocs()
 }
-*/
