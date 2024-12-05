@@ -24,6 +24,7 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/prometheus-community/windows_exporter/internal/mi"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sys/windows"
 )
@@ -36,7 +37,7 @@ var (
 
 type CounterValues = map[string]map[string]CounterValue
 
-type Collector[T any] struct {
+type Collector struct {
 	object                string
 	counters              map[string]Counter
 	handle                pdhQueryHandle
@@ -45,7 +46,7 @@ type Collector[T any] struct {
 
 	nameIndexValue int
 
-	collectCh chan []T
+	collectCh chan any
 	errorCh   chan error
 }
 
@@ -61,7 +62,7 @@ type Counter struct {
 	FieldIndexSecondValue int
 }
 
-func NewCollector[T any](object string, instances []string) (*Collector[T], error) {
+func NewCollector[T any](object string, instances []string) (*Collector, error) {
 	var handle pdhQueryHandle
 
 	if ret := PdhOpenQuery(0, 0, &handle); ret != ErrorSuccess {
@@ -72,11 +73,10 @@ func NewCollector[T any](object string, instances []string) (*Collector[T], erro
 		instances = []string{InstanceEmpty}
 	}
 
-	var values *T
-
+	var values [0]T
 	t := reflect.TypeOf(values).Elem()
 
-	collector := &Collector[T]{
+	collector := &Collector{
 		object:                object,
 		counters:              make(map[string]Counter, t.NumField()),
 		handle:                handle,
@@ -183,21 +183,21 @@ func NewCollector[T any](object string, instances []string) (*Collector[T], erro
 		return nil, errors.New("no counters configured")
 	}
 
-	collector.collectCh = make(chan []T)
+	collector.collectCh = make(chan any)
 	collector.errorCh = make(chan error)
 
 	go collector.collectRoutine()
 
 	var collectValues []T
 
-	if err := collector.Collect(collectValues); err != nil && !errors.Is(err, ErrNoData) {
+	if err := collector.Collect(&collectValues); err != nil && !errors.Is(err, ErrNoData) {
 		return collector, fmt.Errorf("failed to collect initial data: %w", err)
 	}
 
 	return collector, nil
 }
 
-func (c *Collector[T]) Describe() map[string]string {
+func (c *Collector) Describe() map[string]string {
 	if c == nil {
 		return map[string]string{}
 	}
@@ -214,7 +214,7 @@ func (c *Collector[T]) Describe() map[string]string {
 	return desc
 }
 
-func (c *Collector[T]) Collect(v []T) error {
+func (c *Collector) Collect(dst any) error {
 	if c == nil {
 		return ErrPerformanceCounterNotInitialized
 	}
@@ -226,12 +226,12 @@ func (c *Collector[T]) Collect(v []T) error {
 		return ErrPerformanceCounterNotInitialized
 	}
 
-	c.collectCh <- v
+	c.collectCh <- dst
 
 	return <-c.errorCh
 }
 
-func (c *Collector[T]) collectRoutine() {
+func (c *Collector) collectRoutine() {
 	var (
 		err         error
 		itemCount   uint32
@@ -242,18 +242,35 @@ func (c *Collector[T]) collectRoutine() {
 	buf := make([]byte, 1)
 
 	for data := range c.collectCh {
-		if ret := PdhCollectQueryData(c.handle); ret != ErrorSuccess {
-			c.errorCh <- fmt.Errorf("failed to collect query data: %w", NewPdhError(ret))
-
-			continue
-		}
-
-		clear(data)
-		data = data[:0]
-
-		indexMap := map[string]int{}
-
 		err = (func() error {
+			if ret := PdhCollectQueryData(c.handle); ret != ErrorSuccess {
+				return fmt.Errorf("failed to collect query data: %w", NewPdhError(ret))
+			}
+
+			dv := reflect.ValueOf(data)
+			if dv.Kind() != reflect.Ptr || dv.IsNil() {
+				return mi.ErrInvalidEntityType
+			}
+
+			dv = dv.Elem()
+
+			elemType := dv.Type().Elem()
+			elemValue := reflect.ValueOf(reflect.New(elemType).Interface()).Elem()
+
+			if dv.Kind() != reflect.Slice || elemType.Kind() != reflect.Struct {
+				return mi.ErrInvalidEntityType
+			}
+
+			if dv.Len() != 0 {
+				dv.Set(reflect.MakeSlice(dv.Type(), 0, 0))
+			}
+
+			dv.Clear()
+
+			indexMap := map[string]int{}
+
+			stringMap := map[*uint16]string{}
+
 			for _, counter := range c.counters {
 				for _, instance := range counter.Instances {
 					// Get the info with the current buffer size
@@ -279,13 +296,18 @@ func (c *Collector[T]) collectRoutine() {
 
 					items = unsafe.Slice((*PdhRawCounterItem)(unsafe.Pointer(&buf[0])), itemCount)
 
-					if len(data) < int(itemCount) {
-						slices.Grow(data, int(itemCount))
-					}
+					var (
+						instanceName string
+						ok           bool
+					)
 
 					for _, item := range items {
 						if item.RawValue.CStatus == PdhCstatusValidData || item.RawValue.CStatus == PdhCstatusNewData {
-							instanceName := windows.UTF16PtrToString(item.SzName)
+							if instanceName, ok = stringMap[item.SzName]; !ok {
+								instanceName = windows.UTF16PtrToString(item.SzName)
+								stringMap[item.SzName] = instanceName
+							}
+
 							if strings.HasSuffix(instanceName, InstanceTotal) && !c.totalCounterRequested {
 								continue
 							}
@@ -300,54 +322,48 @@ func (c *Collector[T]) collectRoutine() {
 							)
 
 							if index, ok = indexMap[instanceName]; !ok {
-								var counterValues T
-
-								index = len(data)
+								index = dv.Len()
 								indexMap[instanceName] = index
-								data[index] = counterValues
 
-								s := reflect.ValueOf(&data[index]).Elem()
-								s.Field(c.nameIndexValue).SetString(instanceName)
+								elemValue.Field(c.nameIndexValue).SetString(instanceName)
+								dv.Set(reflect.Append(dv, elemValue))
 							}
 
-							s := reflect.ValueOf(&data[index]).Elem()
-							if counter.FieldIndexValue == 0 {
-								continue
-							}
+							value := dv.Index(index).Field(counter.FieldIndexValue)
 
 							// This is a workaround for the issue with the elapsed time counter type.
 							// Source: https://github.com/prometheus-community/windows_exporter/pull/335/files#diff-d5d2528f559ba2648c2866aec34b1eaa5c094dedb52bd0ff22aa5eb83226bd8dR76-R83
 							// Ref: https://learn.microsoft.com/en-us/windows/win32/perfctrs/calculating-counter-values
 							switch counter.Type {
 							case PERF_ELAPSED_TIME:
-								s.Field(counter.FieldIndexValue).SetFloat(float64((item.RawValue.FirstValue - WindowsEpoch) / counter.Frequency))
+								value.SetFloat(float64((item.RawValue.FirstValue - WindowsEpoch) / counter.Frequency))
 							case PERF_100NSEC_TIMER, PERF_PRECISION_100NS_TIMER:
-								s.Field(counter.FieldIndexValue).SetFloat(float64(item.RawValue.FirstValue) * TicksToSecondScaleFactor)
+								value.SetFloat(float64(item.RawValue.FirstValue) * TicksToSecondScaleFactor)
 							case PERF_AVERAGE_BULK, PERF_RAW_FRACTION:
-								if counter.FieldIndexSecondValue != 0 {
-									s.Field(counter.FieldIndexSecondValue).SetFloat(float64(item.RawValue.SecondValue))
+								if false {
+									value.SetFloat(float64(item.RawValue.SecondValue))
 								}
 								fallthrough
 							default:
-								s.Field(counter.FieldIndexValue).SetFloat(float64(item.RawValue.FirstValue))
+								value.SetFloat(float64(item.RawValue.FirstValue))
 							}
 						}
 					}
 				}
 			}
 
+			if dv.Len() == 0 {
+				return ErrNoData
+			}
+
 			return nil
 		})()
-
-		if err == nil && len(data) == 0 {
-			err = ErrNoData
-		}
 
 		c.errorCh <- err
 	}
 }
 
-func (c *Collector[T]) Close() {
+func (c *Collector) Close() {
 	if c == nil {
 		return
 	}
