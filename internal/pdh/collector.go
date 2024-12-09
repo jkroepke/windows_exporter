@@ -93,7 +93,7 @@ func NewCollector[T any](object string, instances []string) (*Collector, error) 
 	}
 
 	for _, f := range reflect.VisibleFields(valueType) {
-		counterName, ok := f.Tag.Lookup("pdh")
+		counterName, ok := f.Tag.Lookup("perflib")
 		if !ok {
 			continue
 		}
@@ -103,18 +103,26 @@ func NewCollector[T any](object string, instances []string) (*Collector, error) 
 			continue
 		}
 
-		counter := Counter{
-			Name:      counterName,
-			Instances: make(map[string]pdhCounterHandle, len(instances)),
+		var counter Counter
+		if counter, ok = collector.counters[counterName]; !ok {
+			counter = Counter{
+				Name:      counterName,
+				Instances: make(map[string]pdhCounterHandle, len(instances)),
+			}
 		}
 
-		if _, ok = f.Tag.Lookup("secondvalue"); ok {
-			counter := collector.counters[counterName]
+		if strings.HasPrefix(counterName, ",secondvalue") {
+			counterName = strings.TrimSuffix(counterName, ",secondvalue")
+
 			counter.FieldIndexSecondValue = f.Index[0]
-			collector.counters[counterName] = counter
-			continue
 		} else {
 			counter.FieldIndexValue = f.Index[0]
+		}
+
+		if len(counter.Instances) != 0 {
+			collector.counters[counterName] = counter
+
+			continue
 		}
 
 		var counterPath string

@@ -44,20 +44,22 @@ func NewCollector[T any](object string, _ []string) (*Collector, error) {
 	}
 
 	for _, f := range reflect.VisibleFields(valueType) {
-		counterName, ok := f.Tag.Lookup("pdh")
+		counterName, ok := f.Tag.Lookup("perflib")
 		if !ok {
 			continue
 		}
 
-		counter := Counter{
-			Name: counterName,
+		var counter Counter
+		if counter, ok = collector.counters[counterName]; !ok {
+			counter = Counter{
+				Name: counterName,
+			}
 		}
 
-		if _, ok = f.Tag.Lookup("secondvalue"); ok {
-			counter := collector.counters[counterName]
+		if strings.HasPrefix(counterName, ",secondvalue") {
+			counterName = strings.TrimSuffix(counterName, ",secondvalue")
+
 			counter.FieldIndexSecondValue = f.Index[0]
-			collector.counters[counterName] = counter
-			continue
 		} else {
 			counter.FieldIndexValue = f.Index[0]
 		}
