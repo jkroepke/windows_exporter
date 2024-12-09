@@ -127,7 +127,7 @@ type perfDataCounterValues struct {
 	DsDirectoryWritesPerSec                                          float64 `perfdata:"DS Directory Writes/sec"`
 	DsMonitorListSize                                                float64 `perfdata:"DS Monitor List Size"`
 	DsNameCacheHitRate                                               float64 `perfdata:"DS Name Cache hit rate"`
-	DsNameCacheHitRateSecondValue                                    float64 `perfdata:"DS Name Cache hit rate" secondvalue:"true"`
+	DsNameCacheHitRateSecondValue                                    float64 `perfdata:"DS Name Cache hit rate,secondvalue"`
 	DsNotifyQueueSize                                                float64 `perfdata:"DS Notify Queue Size"`
 	DsSearchSubOperationsPerSec                                      float64 `perfdata:"DS Search sub-operations/sec"`
 	DsSecurityDescriptorPropagationsEvents                           float64 `perfdata:"DS Security Descriptor Propagations Events"`
