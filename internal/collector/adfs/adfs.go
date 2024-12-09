@@ -382,7 +382,7 @@ func (c *Collector) Build(_ *slog.Logger, _ *mi.Session) error {
 }
 
 func (c *Collector) Collect(ch chan<- prometheus.Metric) error {
-	err := c.perfDataCollector.Collect(c.perfDataObject)
+	err := c.perfDataCollector.Collect(&c.perfDataObject)
 	if err != nil {
 		return fmt.Errorf("failed to collect ADFS metrics: %w", err)
 	}

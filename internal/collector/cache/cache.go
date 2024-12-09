@@ -285,7 +285,7 @@ func (c *Collector) Build(_ *slog.Logger, _ *mi.Session) error {
 
 // Collect implements the Collector interface.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) error {
-	err := c.perfDataCollector.Collect(c.perfDataObject)
+	err := c.perfDataCollector.Collect(&c.perfDataObject)
 	if err != nil {
 		return fmt.Errorf("failed to collect Cache metrics: %w", err)
 	}
