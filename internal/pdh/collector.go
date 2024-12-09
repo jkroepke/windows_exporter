@@ -74,25 +74,25 @@ func NewCollector[T any](object string, instances []string) (*Collector, error) 
 	}
 
 	var values [0]T
-	t := reflect.TypeOf(values).Elem()
+	valueType := reflect.TypeOf(values).Elem()
 
 	collector := &Collector{
 		object:                object,
-		counters:              make(map[string]Counter, t.NumField()),
+		counters:              make(map[string]Counter, valueType.NumField()),
 		handle:                handle,
 		totalCounterRequested: slices.Contains(instances, InstanceTotal),
 		mu:                    sync.RWMutex{},
 	}
 
-	errs := make([]error, 0, t.NumField())
+	errs := make([]error, 0, valueType.NumField())
 
-	if f, ok := t.FieldByName("Name"); ok {
+	if f, ok := valueType.FieldByName("Name"); ok {
 		if f.Type.Kind() == reflect.String {
 			collector.nameIndexValue = f.Index[0]
 		}
 	}
 
-	for _, f := range reflect.VisibleFields(t) {
+	for _, f := range reflect.VisibleFields(valueType) {
 		counterName, ok := f.Tag.Lookup("pdh")
 		if !ok {
 			continue
@@ -325,7 +325,10 @@ func (c *Collector) collectRoutine() {
 								index = dv.Len()
 								indexMap[instanceName] = index
 
-								elemValue.Field(c.nameIndexValue).SetString(instanceName)
+								if c.nameIndexValue != 0 {
+									elemValue.Field(c.nameIndexValue).SetString(instanceName)
+								}
+
 								dv.Set(reflect.Append(dv, elemValue))
 							}
 
@@ -340,9 +343,12 @@ func (c *Collector) collectRoutine() {
 							case PERF_100NSEC_TIMER, PERF_PRECISION_100NS_TIMER:
 								value.SetFloat(float64(item.RawValue.FirstValue) * TicksToSecondScaleFactor)
 							case PERF_AVERAGE_BULK, PERF_RAW_FRACTION:
-								if false {
-									value.SetFloat(float64(item.RawValue.SecondValue))
+								if counter.FieldIndexSecondValue != 0 {
+									dv.Index(index).
+										Field(counter.FieldIndexSecondValue).
+										SetFloat(float64(item.RawValue.SecondValue))
 								}
+
 								fallthrough
 							default:
 								value.SetFloat(float64(item.RawValue.FirstValue))

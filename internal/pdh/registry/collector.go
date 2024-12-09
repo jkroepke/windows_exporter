@@ -2,15 +2,19 @@ package registry
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
+	"github.com/prometheus-community/windows_exporter/internal/mi"
 	"github.com/prometheus-community/windows_exporter/internal/pdh"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 type Collector struct {
 	object string
 	query  string
+
+	counters       map[string]Counter
+	nameIndexValue int
 }
 
 type Counter struct {
@@ -19,15 +23,51 @@ type Counter struct {
 	Instances map[string]uint32
 	Type      uint32
 	Frequency float64
+
+	FieldIndexValue       int
+	FieldIndexSecondValue int
 }
 
-func NewCollector(object string, _ []string, _ []string) (*Collector, error) {
+func NewCollector[T any](object string, _ []string) (*Collector, error) {
 	collector := &Collector{
 		object: object,
 		query:  MapCounterToIndex(object),
 	}
 
-	if _, err := collector.Collect(); err != nil {
+	var values [0]T
+	valueType := reflect.TypeOf(values).Elem()
+
+	if f, ok := valueType.FieldByName("Name"); ok {
+		if f.Type.Kind() == reflect.String {
+			collector.nameIndexValue = f.Index[0]
+		}
+	}
+
+	for _, f := range reflect.VisibleFields(valueType) {
+		counterName, ok := f.Tag.Lookup("pdh")
+		if !ok {
+			continue
+		}
+
+		counter := Counter{
+			Name: counterName,
+		}
+
+		if _, ok = f.Tag.Lookup("secondvalue"); ok {
+			counter := collector.counters[counterName]
+			counter.FieldIndexSecondValue = f.Index[0]
+			collector.counters[counterName] = counter
+			continue
+		} else {
+			counter.FieldIndexValue = f.Index[0]
+		}
+
+		collector.counters[counterName] = counter
+	}
+
+	var collectValues []T
+
+	if err := collector.Collect(&collectValues); err != nil {
 		return nil, fmt.Errorf("failed to collect initial data: %w", err)
 	}
 
@@ -38,17 +78,35 @@ func (c *Collector) Describe() map[string]string {
 	return map[string]string{}
 }
 
-func (c *Collector) Collect() (pdh.CounterValues, error) {
+func (c *Collector) Collect(data any) error {
+	dv := reflect.ValueOf(data)
+	if dv.Kind() != reflect.Ptr || dv.IsNil() {
+		return mi.ErrInvalidEntityType
+	}
+
+	dv = dv.Elem()
+
+	elemType := dv.Type().Elem()
+	elemValue := reflect.ValueOf(reflect.New(elemType).Interface()).Elem()
+
+	if dv.Kind() != reflect.Slice || elemType.Kind() != reflect.Struct {
+		return mi.ErrInvalidEntityType
+	}
+
 	perfObjects, err := QueryPerformanceData(c.query, c.object)
 	if err != nil {
-		return nil, fmt.Errorf("QueryPerformanceData: %w", err)
+		return fmt.Errorf("QueryPerformanceData: %w", err)
 	}
 
 	if len(perfObjects) == 0 || perfObjects[0] == nil || len(perfObjects[0].Instances) == 0 {
-		return pdh.CounterValues{}, nil
+		return nil
 	}
 
-	data := make(pdh.CounterValues, len(perfObjects[0].Instances))
+	if dv.Len() != 0 {
+		dv.Set(reflect.MakeSlice(dv.Type(), 0, len(perfObjects[0].Instances)))
+	}
+
+	dv.Clear()
 
 	for _, perfObject := range perfObjects {
 		if perfObject.Name != c.object {
@@ -65,55 +123,46 @@ func (c *Collector) Collect() (pdh.CounterValues, error) {
 				instanceName = pdh.InstanceEmpty
 			}
 
-			if _, ok := data[instanceName]; !ok {
-				if _, ok := data[instanceName]; !ok {
-					data[instanceName] = make(map[string]pdh.CounterValue, len(perfInstance.Counters))
-				}
+			if c.nameIndexValue != 0 {
+				elemValue.Field(c.nameIndexValue).SetString(instanceName)
 			}
+
+			dv.Set(reflect.Append(dv, elemValue))
+			index := dv.Len() - 1
 
 			for _, perfCounter := range perfInstance.Counters {
 				if perfCounter.Def.IsBaseValue && !perfCounter.Def.IsNanosecondCounter {
 					continue
 				}
 
-				if _, ok := data[instanceName][perfCounter.Def.Name]; !ok {
-					data[instanceName][perfCounter.Def.Name] = pdh.CounterValue{
-						Type: prometheus.GaugeValue,
-					}
+				counter, ok := c.counters[perfCounter.Def.Name]
+				if !ok {
+					continue
 				}
 
-				var metricType prometheus.ValueType
-				if val, ok := pdh.SupportedCounterTypes[perfCounter.Def.CounterType]; ok {
-					metricType = val
-				} else {
-					metricType = prometheus.GaugeValue
-				}
-
-				values := pdh.CounterValue{
-					Type: metricType,
-				}
+				value := dv.Index(index).Field(counter.FieldIndexValue)
 
 				switch perfCounter.Def.CounterType {
 				case pdh.PERF_ELAPSED_TIME:
-					values.FirstValue = float64(perfCounter.Value-pdh.WindowsEpoch) / float64(perfObject.Frequency)
-					values.SecondValue = float64(perfCounter.SecondValue-pdh.WindowsEpoch) / float64(perfObject.Frequency)
+					value.SetFloat(float64((perfCounter.Value - pdh.WindowsEpoch) / perfObject.Frequency))
 				case pdh.PERF_100NSEC_TIMER, pdh.PERF_PRECISION_100NS_TIMER:
-					values.FirstValue = float64(perfCounter.Value) * pdh.TicksToSecondScaleFactor
-					values.SecondValue = float64(perfCounter.SecondValue) * pdh.TicksToSecondScaleFactor
+					value.SetFloat(float64(perfCounter.Value) * pdh.TicksToSecondScaleFactor)
 				case pdh.PERF_AVERAGE_BULK, pdh.PERF_RAW_FRACTION:
-					values.FirstValue = float64(perfCounter.Value)
-					values.SecondValue = float64(perfCounter.SecondValue)
-				default:
-					values.FirstValue = float64(perfCounter.Value)
-				}
+					if counter.FieldIndexSecondValue != 0 {
+						dv.Index(index).
+							Field(counter.FieldIndexSecondValue).
+							SetFloat(float64(perfCounter.SecondValue))
+					}
 
-				data[instanceName][perfCounter.Def.Name] = values
+					fallthrough
+				default:
+					value.SetFloat(float64(perfCounter.Value))
+				}
 			}
 		}
 	}
 
-	return data, nil
+	return nil
 }
 
-func (c *Collector) Close() {
-}
+func (c *Collector) Close() {}
