@@ -350,7 +350,7 @@ func (c *Collector) collectService(ch chan<- prometheus.Metric, serviceName stri
 
 	logLevel := slog.LevelWarn
 
-	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) || errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
 		logLevel = slog.LevelDebug
 	}
 

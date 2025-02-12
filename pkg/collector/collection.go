@@ -215,13 +215,13 @@ func (c *Collection) Build(logger *slog.Logger) error {
 	errCh := make(chan error, len(c.collectors))
 
 	for _, collector := range c.collectors {
-		go func() {
+		go func(collector Collector) {
 			defer wg.Done()
 
-			if err = collector.Build(logger, c.miSession); err != nil {
+			if err := collector.Build(logger, c.miSession); err != nil {
 				errCh <- fmt.Errorf("error build collector %s: %w", collector.GetName(), err)
 			}
-		}()
+		}(collector)
 	}
 
 	wg.Wait()
@@ -243,6 +243,28 @@ func (c *Collection) Build(logger *slog.Logger) error {
 
 		errs = append(errs, err)
 	}
+
+	wg = sync.WaitGroup{}
+	wg.Add(len(c.collectors))
+
+	for _, collector := range c.collectors {
+		go func(collector Collector) {
+			defer wg.Done()
+
+			metricsCh := make(chan prometheus.Metric, 1000)
+
+			go func() {
+				for range metricsCh {
+				}
+			}()
+
+			_ = collector.Collect(metricsCh)
+
+			close(metricsCh)
+		}(collector)
+	}
+
+	wg.Wait()
 
 	return errors.Join(errs...)
 }
