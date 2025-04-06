@@ -9,7 +9,7 @@
     "RT_MANIFEST": {
         "#1": {
             "0409": {
-                "description": "A Prometheus exporter for Windows machines.",
+                "description": "Prometheus windows_exporter",
                 "minimum-os": "win7",
                 "execution-level": "as invoker",
                 "ui-access": false,
@@ -38,7 +38,7 @@
                     "0409": {
                         "Comments": "",
                         "CompanyName": "Prometheus Community",
-                        "FileDescription": "A Prometheus exporter for Windows machines.",
+                        "FileDescription": "Prometheus windows_exporter",
                         "FileVersion": "",
                         "InternalName": "windows_exporter",
                         "LegalCopyright": "",
