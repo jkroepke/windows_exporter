@@ -42,6 +42,7 @@ import (
 	"github.com/prometheus-community/windows_exporter/internal/log/flag"
 	"github.com/prometheus-community/windows_exporter/internal/utils"
 	"github.com/prometheus-community/windows_exporter/pkg/collector"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/exporter-toolkit/web"
 	webflag "github.com/prometheus/exporter-toolkit/web/kingpinflag"
@@ -49,6 +50,11 @@ import (
 )
 
 func main() {
+	// Make sure no one occasionally uses global objects.
+	http.DefaultServeMux = nil
+	prometheus.DefaultRegisterer = nil
+	prometheus.DefaultGatherer = nil
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
 
 	exitCode := run(ctx, os.Args[1:])
