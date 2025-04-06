@@ -285,7 +285,7 @@ func (c *Collector) Build(logger *slog.Logger, _ *mi.Session) error {
 	}
 
 	if slices.Contains(c.config.CollectorsEnabled, subCollectorNicInfo) {
-		logger.Info("nic/addresses collector is in an experimental state! The configuration and metrics may change in future. Please report any issues.",
+		logger.Info("nic/nic_info collector is in an experimental state! The configuration and metrics may change in future. Please report any issues.",
 			slog.String("collector", Name),
 		)
 	}

@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"unsafe"
 
+	"github.com/prometheus-community/windows_exporter/internal/headers/win32api"
 	"golang.org/x/sys/windows"
 )
 
@@ -72,20 +73,20 @@ type wtsSessionInfo1 struct {
 	// SessionID A session identifier assigned by the RD Session Host server, RD Virtualization Host server, or virtual machine.
 	SessionID uint32
 	// pSessionName A pointer to a null-terminated string that contains the name of this session. For example, "services", "console", or "RDP-Tcp#0".
-	pSessionName *uint16
+	pSessionName win32api.LPWSTR
 	// pHostName A pointer to a null-terminated string that contains the name of the computer that the session is running on.
 	// If the session is running directly on an RD Session Host server or RD Virtualization Host server, the string contains NULL.
 	// If the session is running on a virtual machine, the string contains the name of the virtual machine.
-	pHostName *uint16
+	pHostName win32api.LPWSTR
 	// pUserName A pointer to a null-terminated string that contains the name of the user who is logged on to the session.
 	// If no user is logged on to the session, the string contains NULL.
-	pUserName *uint16
+	pUserName win32api.LPWSTR
 	// pDomainName A pointer to a null-terminated string that contains the domain name of the user who is logged on to the session.
 	// If no user is logged on to the session, the string contains NULL.
-	pDomainName *uint16
+	pDomainName win32api.LPWSTR
 	// pFarmName A pointer to a null-terminated string that contains the name of the farm that the virtual machine is joined to.
 	// If the session is not running on a virtual machine that is joined to a farm, the string contains NULL.
-	pFarmName *uint16
+	pFarmName win32api.LPWSTR
 }
 
 type WTSSession struct {
@@ -184,7 +185,7 @@ func WTSEnumerateSessionsEx(server windows.Handle, logger *slog.Logger) ([]WTSSe
 	)
 
 	if r1 != 1 {
-		return nil, err
+		return nil, fmt.Errorf("failed to enumerate sessions: %w", err)
 	}
 
 	if sessionInfoPointer != 0 {
@@ -195,24 +196,19 @@ func WTSEnumerateSessionsEx(server windows.Handle, logger *slog.Logger) ([]WTSSe
 		}(WTSTypeSessionInfoLevel1, sessionInfoPointer, count)
 	}
 
-	var sizeTest wtsSessionInfo1
-	sessionSize := unsafe.Sizeof(sizeTest)
-
+	sessionsData := unsafe.Slice((*wtsSessionInfo1)(unsafe.Pointer(sessionInfoPointer)), count)
 	sessions := make([]WTSSession, 0, count)
 
-	for i := range count {
-		curPtr := unsafe.Pointer(sessionInfoPointer + (uintptr(i) * sessionSize))
-		data := (*wtsSessionInfo1)(curPtr)
-
+	for _, data := range sessionsData {
 		sessionInfo := WTSSession{
 			ExecEnvID:   data.ExecEnvID,
 			State:       WTSConnectState(data.State),
 			SessionID:   data.SessionID,
-			SessionName: windows.UTF16PtrToString(data.pSessionName),
-			HostName:    windows.UTF16PtrToString(data.pHostName),
-			UserName:    windows.UTF16PtrToString(data.pUserName),
-			DomainName:  windows.UTF16PtrToString(data.pDomainName),
-			FarmName:    windows.UTF16PtrToString(data.pFarmName),
+			SessionName: data.pSessionName.String(),
+			HostName:    data.pHostName.String(),
+			UserName:    data.pUserName.String(),
+			DomainName:  data.pDomainName.String(),
+			FarmName:    data.pFarmName.String(),
 		}
 		sessions = append(sessions, sessionInfo)
 	}

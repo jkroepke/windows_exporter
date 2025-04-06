@@ -17,7 +17,10 @@
 
 package pdh
 
-import "errors"
+import (
+	"errors"
+	"sync"
+)
 
 var (
 	ErrNoData                           = NewPdhError(NoData)
@@ -27,7 +30,7 @@ var (
 // Error represents error returned from Performance Counters API.
 type Error struct {
 	ErrorCode uint32
-	errorText string
+	errorText func() string
 }
 
 func (m *Error) Is(err error) bool {
@@ -44,12 +47,14 @@ func (m *Error) Is(err error) bool {
 }
 
 func (m *Error) Error() string {
-	return m.errorText
+	return m.errorText()
 }
 
 func NewPdhError(code uint32) error {
 	return &Error{
 		ErrorCode: code,
-		errorText: FormatError(code),
+		errorText: sync.OnceValue(func() string {
+			return FormatError(code)
+		}),
 	}
 }

@@ -31,7 +31,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -90,7 +89,7 @@ var IsService = func() bool {
 			err := svc.Run(serviceName, &windowsExporterService{})
 			if err != nil {
 				// https://github.com/open-telemetry/opentelemetry-collector/pull/9042
-				if !errors.Is(err, windows.ERROR_FAILED_SERVICE_CONTROLLER_CONNECT) {
+				if err != windows.ERROR_FAILED_SERVICE_CONTROLLER_CONNECT {
 					if logErr := logToEventToLog(windows.EVENTLOG_ERROR_TYPE, fmt.Sprintf("failed to start service: %v", err)); logErr != nil {
 						logToFile(fmt.Sprintf("failed to start service: %v", err))
 					}
@@ -207,7 +206,7 @@ func isWindowsService() (bool, error) {
 		err = windows.NtQuerySystemInformation(windows.SystemProcessInformation, unsafe.Pointer(parentProcess), infoSize, &infoSize)
 		if err == nil {
 			break
-		} else if !errors.Is(err, windows.STATUS_INFO_LENGTH_MISMATCH) {
+		} else if err != windows.STATUS_INFO_LENGTH_MISMATCH {
 			return false, err
 		}
 	}

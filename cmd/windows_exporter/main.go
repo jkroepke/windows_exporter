@@ -179,7 +179,7 @@ func run(ctx context.Context, args []string) int {
 
 	logCurrentUser(ctx, logger)
 
-	logger.InfoContext(ctx, "Enabled collectors: "+strings.Join(enabledCollectorList, ", "))
+	logger.LogAttrs(ctx, slog.LevelInfo, "Enabled collectors: "+strings.Join(enabledCollectorList, ", "))
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /health", httphandler.NewHealthHandler())
