@@ -27,31 +27,37 @@ import (
 
 	"github.com/Microsoft/hcsshim/osversion"
 	"github.com/alecthomas/kingpin/v2"
+	"github.com/beevik/ntp"
 	"github.com/prometheus-community/windows_exporter/internal/headers/kernel32"
 	"github.com/prometheus-community/windows_exporter/internal/mi"
 	"github.com/prometheus-community/windows_exporter/internal/pdh"
 	"github.com/prometheus-community/windows_exporter/internal/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 const (
 	Name = "time"
 
 	collectorSystemTime = "system_time"
-	collectorNTP        = "ntp"
+	collectorW32Time    = "w32time"
+	collectorNTPClient  = "ntp_client"
 )
 
 type Config struct {
 	CollectorsEnabled []string `yaml:"collectors_enabled"`
+	NTPServer         string   `yaml:"ntp_server"`
 }
 
 //nolint:gochecknoglobals
 var ConfigDefaults = Config{
 	CollectorsEnabled: []string{
 		collectorSystemTime,
-		collectorNTP,
+		collectorW32Time,
+		collectorNTPClient,
 	},
+	NTPServer: "",
 }
 
 // Collector is a Prometheus Collector for Perflib counter metrics.
@@ -72,6 +78,8 @@ type Collector struct {
 	ntpRoundTripDelay               *prometheus.Desc
 	ntpServerIncomingRequestsTotal  *prometheus.Desc
 	ntpServerOutgoingResponsesTotal *prometheus.Desc
+	ntpServerResponseRTT            *prometheus.Desc
+	ntpClockOffset                  *prometheus.Desc
 }
 
 func New(config *Config) *Collector {
@@ -81,6 +89,10 @@ func New(config *Config) *Collector {
 
 	if config.CollectorsEnabled == nil {
 		config.CollectorsEnabled = ConfigDefaults.CollectorsEnabled
+	}
+
+	if config.NTPServer == "" {
+		config.NTPServer = ConfigDefaults.NTPServer
 	}
 
 	c := &Collector{
@@ -103,6 +115,11 @@ func NewWithFlags(app *kingpin.Application) *Collector {
 		"Comma-separated list of collectors to use. Defaults to all, if not specified. ntp may not available on all systems.",
 	).Default(strings.Join(ConfigDefaults.CollectorsEnabled, ",")).StringVar(&collectorsEnabled)
 
+	app.Flag(
+		"collector.time.ntp-server",
+		"NTP server to used by ntp_client sub collector to identify a click screw. If not specified, the systems NTP server is used.",
+	).Default("").StringVar(&c.config.NTPServer)
+
 	app.Action(func(*kingpin.ParseContext) error {
 		c.config.CollectorsEnabled = strings.Split(collectorsEnabled, ",")
 
@@ -117,7 +134,7 @@ func (c *Collector) GetName() string {
 }
 
 func (c *Collector) Close() error {
-	if slices.Contains(c.config.CollectorsEnabled, collectorNTP) {
+	if slices.Contains(c.config.CollectorsEnabled, collectorW32Time) {
 		c.perfDataCollector.Close()
 	}
 
@@ -126,7 +143,7 @@ func (c *Collector) Close() error {
 
 func (c *Collector) Build(_ *slog.Logger, _ *mi.Session) error {
 	for _, collector := range c.config.CollectorsEnabled {
-		if !slices.Contains([]string{collectorSystemTime, collectorNTP}, collector) {
+		if !slices.Contains(ConfigDefaults.CollectorsEnabled, collector) {
 			return fmt.Errorf("unknown collector: %s", collector)
 		}
 	}
@@ -188,12 +205,44 @@ func (c *Collector) Build(_ *slog.Logger, _ *mi.Session) error {
 		nil,
 		nil,
 	)
+	c.ntpServerResponseRTT = prometheus.NewDesc(
+		prometheus.BuildFQName(types.Namespace, Name, "ntp_server_rtt_seconds"),
+		"Response time of the NTP server in seconds",
+		nil,
+		nil,
+	)
+	c.ntpClockOffset = prometheus.NewDesc(
+		prometheus.BuildFQName(types.Namespace, Name, "ntp_server_clock_offset_seconds"),
+		"Clock offset of the NTP server in seconds",
+		nil,
+		nil,
+	)
 
 	var err error
 
-	c.perfDataCollector, err = pdh.NewCollector[perfDataCounterValues](pdh.CounterTypeRaw, "Windows Time Service", nil)
-	if err != nil {
-		return fmt.Errorf("failed to create Windows Time Service collector: %w", err)
+	if slices.Contains(c.config.CollectorsEnabled, collectorW32Time) {
+		c.perfDataCollector, err = pdh.NewCollector[perfDataCounterValues](pdh.CounterTypeRaw, "Windows Time Service", nil)
+		if err != nil {
+			return fmt.Errorf("failed to create Windows Time Service collector: %w", err)
+		}
+	}
+
+	if c.config.NTPServer == "" {
+		key, err := registry.OpenKey(registry.LOCAL_MACHINE,
+			`SYSTEM\CurrentControlSet\Services\W32Time\Parameters`,
+			registry.QUERY_VALUE)
+		if err != nil {
+			return fmt.Errorf("failed to detect systems NTP server: failed to open registry key: %w", err)
+		}
+
+		defer key.Close()
+
+		ntpServer, _, err := key.GetStringValue("NtpServer")
+		if err != nil {
+			return fmt.Errorf("failed to detect systems NTP server: failed to get NtpServer value: %w", err)
+		}
+
+		c.config.NTPServer = ntpServer
 	}
 
 	return nil
@@ -206,13 +255,19 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) error {
 
 	if slices.Contains(c.config.CollectorsEnabled, collectorSystemTime) {
 		if err := c.collectTime(ch); err != nil {
-			errs = append(errs, fmt.Errorf("failed collecting time metrics: %w", err))
+			errs = append(errs, fmt.Errorf("failed collecting time/%s metrics: %w", collectorSystemTime, err))
 		}
 	}
 
-	if slices.Contains(c.config.CollectorsEnabled, collectorNTP) {
+	if slices.Contains(c.config.CollectorsEnabled, collectorW32Time) {
+		if err := c.collectW32Time(ch); err != nil {
+			errs = append(errs, fmt.Errorf("failed collecting time/%s metrics: %w", collectorW32Time, err))
+		}
+	}
+
+	if slices.Contains(c.config.CollectorsEnabled, collectorNTPClient) {
 		if err := c.collectNTP(ch); err != nil {
-			errs = append(errs, fmt.Errorf("failed collecting time ntp metrics: %w", err))
+			errs = append(errs, fmt.Errorf("failed collecting time/%s metrics: %w", collectorNTPClient, err))
 		}
 	}
 
@@ -244,7 +299,7 @@ func (c *Collector) collectTime(ch chan<- prometheus.Metric) error {
 	return nil
 }
 
-func (c *Collector) collectNTP(ch chan<- prometheus.Metric) error {
+func (c *Collector) collectW32Time(ch chan<- prometheus.Metric) error {
 	err := c.perfDataCollector.Collect(&c.perfDataObject)
 	if err != nil {
 		return fmt.Errorf("failed to collect time metrics: %w", err)
@@ -288,6 +343,33 @@ func (c *Collector) collectNTP(ch chan<- prometheus.Metric) error {
 		c.ntpServerOutgoingResponsesTotal,
 		prometheus.CounterValue,
 		c.perfDataObject[0].NTPServerOutgoingResponsesTotal,
+	)
+
+	return nil
+}
+
+func (c *Collector) collectNTP(ch chan<- prometheus.Metric) error {
+	response, err := ntp.QueryWithOptions(c.config.NTPServer, ntp.QueryOptions{
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to query NTP server %s: %w", c.config.NTPServer, err)
+	}
+
+	if err = response.Validate(); err != nil {
+		return fmt.Errorf("failed to validate NTP response from server %s: %w", c.config.NTPServer, err)
+	}
+
+	ch <- prometheus.MustNewConstMetric(
+		c.ntpClockOffset,
+		prometheus.GaugeValue,
+		response.ClockOffset.Seconds(),
+	)
+
+	ch <- prometheus.MustNewConstMetric(
+		c.ntpServerResponseRTT,
+		prometheus.GaugeValue,
+		response.RTT.Seconds(),
 	)
 
 	return nil
