@@ -69,8 +69,19 @@ const (
 )
 
 const (
-	SCHED_S_SUCCESS          TaskResult = 0x0
-	SCHED_S_TASK_HAS_NOT_RUN TaskResult = 0x00041303
+	SCHED_S_SUCCESS                TaskResult = 0x0
+	SCHED_S_TASK_READY             TaskResult = 0x00041300
+	SCHED_S_TASK_RUNNING           TaskResult = 0x00041301
+	SCHED_S_TASK_DISABLED          TaskResult = 0x00041302
+	SCHED_S_TASK_HAS_NOT_RUN       TaskResult = 0x00041303
+	SCHED_S_TASK_NO_MORE_RUNS      TaskResult = 0x00041304
+	SCHED_S_TASK_NOT_SCHEDULED     TaskResult = 0x00041305
+	SCHED_S_TASK_TERMINATED        TaskResult = 0x00041306
+	SCHED_S_TASK_NO_VALID_TRIGGERS TaskResult = 0x00041307
+	SCHED_S_EVENT_TRIGGER          TaskResult = 0x00041308
+	SCHED_E_TRIGGER_NOT_FOUND      TaskResult = 0x80041309
+	SCHED_E_TASK_NOT_READY         TaskResult = 0x8004130A
+	SCHED_E_TASK_NOT_RUNNING       TaskResult = 0x8004130A
 )
 
 type ScheduledTask struct {
@@ -252,8 +263,7 @@ func getScheduledTasks() (ScheduledTasks, error) {
 	defer runtime.UnlockOSThread()
 
 	if err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED|ole.COINIT_DISABLE_OLE1DDE); err != nil {
-		var oleCode *ole.OleError
-		if errors.As(err, &oleCode) && oleCode.Code() != ole.S_OK && oleCode.Code() != S_FALSE {
+		if oleCode, ok := errors.AsType[*ole.OleError](err); ok && oleCode.Code() != ole.S_OK && oleCode.Code() != S_FALSE {
 			return nil, err
 		}
 	}
