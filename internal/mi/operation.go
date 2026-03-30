@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -151,7 +152,15 @@ func (o *Operation) GetInstance() (*Instance, bool, error) {
 		uintptr(unsafe.Pointer(&errorDetails)),
 	)
 	if !errors.Is(instanceResult, MI_RESULT_OK) {
-		return nil, false, fmt.Errorf("instance result: %w (%s)", instanceResult, windows.UTF16PtrToString(errorMessageUTF16))
+		errorMessage := strings.TrimSpace(windows.UTF16PtrToString(errorMessageUTF16))
+		if errorMessage == "Timed out" {
+			instanceResult = MI_RESULT_INVALID_OPERATION_TIMEOUT
+			errorMessage = ""
+		} else {
+			errorMessage = fmt.Sprintf(" (%s)", errorMessage)
+		}
+
+		return nil, false, fmt.Errorf("instance result: %w%s", instanceResult, errorMessage)
 	}
 
 	if result := ResultError(r0); !errors.Is(result, MI_RESULT_OK) {
@@ -265,6 +274,20 @@ func (o *OperationOptions) SetTimeout(timeout time.Duration) error {
 		uintptr(unsafe.Pointer(NewInterval(timeout))),
 		0,
 	)
+
+	if result := ResultError(r0); !errors.Is(result, MI_RESULT_OK) {
+		return result
+	}
+
+	return nil
+}
+
+func (o *OperationOptions) Close() error {
+	if o == nil || o.ft == nil {
+		return ErrNotInitialized
+	}
+
+	r0, _, _ := syscall.SyscallN(o.ft.Clone, uintptr(unsafe.Pointer(o)))
 
 	if result := ResultError(r0); !errors.Is(result, MI_RESULT_OK) {
 		return result
