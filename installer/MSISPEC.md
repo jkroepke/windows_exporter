@@ -28,7 +28,8 @@ As of 2026-10-25.
 - [13. WiX v4 and later](#13-wix-v4-and-later)
 - [14. Implementation guide for a Go builder](#14-implementation-guide-for-a-go-builder)
 - [15. Test vectors and verification](#15-test-vectors-and-verification)
-- [16. Full specification](#16-full-specification)
+- [16. Field reports from msitools](#16-field-reports-from-msitools)
+- [17. Full specification](#17-full-specification)
 
 ## Purpose and scope
 
@@ -59,8 +60,11 @@ Three constraints shape the design:
 
 Conventions: MUST, SHOULD and MAY follow RFC 2119. Integers are little-endian
 unless stated. **(observed)** marks a fact confirmed on real packages built by
-WiX or written by the native Windows Installer engine. **Unverified** marks a
-point that could not be confirmed; each one names the default to implement.
+WiX or written by the native Windows Installer engine. **(reported)** marks a
+Windows Installer behaviour taken from a public msitools bug report or merge
+request whose author ran the package on Windows (section 16). **Unverified**
+marks a point that could not be confirmed; each one names the default to
+implement.
 
 ## 1. How an MSI file is built
 
@@ -147,6 +151,8 @@ All-black trees are also valid. SIDs: root 0, then depth-first pre-order with ch
 - Writers SHOULD write v3 and MUST fail above 0x7FFFFE00 bytes. A v4 file above 0x7FFFFF00 bytes MUST reserve sector 0x7FFFE as an ENDOFCHAIN range-lock sector.
 - Readers MUST accept both versions; two large packages written by the native engine were v4 (observed). They MUST reject a bad signature, byte order, or (major, shift) other than (3, 9) and (4, 12).
 - Readers SHOULD look names up in a map from a full in-order walk, not by tree search. They ignore colours, keep visited sets, and never allocate from unchecked sizes.
+- Readers MUST treat a size-0 stream as empty whatever its starting sector, without following a chain. Other writers emit 0-byte `_StringData` and `_Tables` streams with a mini-stream start sector, and one CFB library has failed to open them (reported).
+- Every directory entry the walk finds MUST be readable by name. One reader dropped embedded cabinets of current Windows SDK packages because it opened streams by index (reported).
 
 Test vector (chapter 01 §15): `.msi` root, `Small` (`0123456789` × 10) and `Large` (5000 bytes, byte i = i mod 256). `Small` is the black top node; `Large` is its red left child. v3: 7680 bytes, SHA-256 `37d8668bf78bc6da2c9b3c6fa3da9c0ffb6824baee21bf13ff9b02dd74e08aed`. v4: 28672 bytes, SHA-256 `acb3c3db476f1d8aebfac49e89b86895756faa24288228a61f617d3c4d54956a`.
 
@@ -180,7 +186,8 @@ Every string in every table is stored as a string ID; ID 0 is NULL. `_StringPool
 | Long, exactly when length > 65535 | 8 | `u16 0, u16 refcount (≥ 1), u32 length`, still one ID |
 
 - `_StringData` concatenates non-free strings in ID order, without terminators. Lengths are bytes in the database code page and MUST sum to its size.
-- No empty strings (empty equals NULL) and no duplicates. Canonical writers SHOULD leave no free slots.
+- The long entry is exactly `0, refcount, low16(length), high16(length)` as u16 words. One open-source writer emitted `0, high16(length), low16(length), refcount` instead, and its packages with a string over 65535 bytes do not load (reported). A license RTF above 64 KiB is enough to need a long entry; a test vector MUST cover one.
+- No empty strings (empty equals NULL) and no duplicates. Canonical writers SHOULD leave no free slots. Readers MUST accept them: WiX-built packages have free slots (reported), so a string added later can get an ID below existing keys.
 - A refcount MUST equal the stored references in all table streams, `_Tables` and `_Columns` included (observed exact in native output). Fail above 65535.
 - IDs are 2 bytes, or 3 (u16 low, u8 high) with the flag. Writers set it when the highest ID is ≥ 65535; readers MUST honour it.
 - Code page 0 allows ASCII only; otherwise use an ANSI code page or 65001, which a WiX 5-built package used (observed). Never 1200/1201; fail rather than substitute `?`.
@@ -203,7 +210,8 @@ String words: `sN` 0x0D00 + N, `SN` 0x1D00 + N, `lN` 0x0F00 + N, `LN` 0x1F00 + N
 - Per table: `Number` 1..n contiguous, keys first in key order, at least one key, at most one binary column, SHOULD be ≤ 32 columns.
 - A table with rows has one stream under its encoded name. An empty table has no stream (observed); readers treat it as empty.
 - Stream length MUST be a multiple of `rowSize`. Layout is column-major: `offset(c, r) = rowCount × Σ width(1..c−1) + r × width(c)`.
-- Rows MUST be sorted ascending by key columns, comparing stored values: string IDs, and biased integers as unsigned (observed in all native tables).
+- Rows MUST be sorted ascending by key columns, comparing stored values: string IDs, and biased integers as unsigned (observed in all native tables). The engine needs it: a `Property` table with one row out of order fails to open with error 2211, so the install fails with 1605 for lack of a `ProductCode` (reported). A NULL key column (0) sorts first, as in multi-row `Upgrade` tables.
+- Any edit of an existing package re-sorts every table it touches after assigning string IDs, because a new string's ID can fall anywhere in the order.
 - 0 is NULL for every kind and MUST NOT appear in non-nullable columns. int16 stores `(v + 0x8000) & 0xFFFF` (−32767…32767); int32 stores `v XOR 0x80000000` (±2147483647). So `Media.DiskId = 1` is `01 80` and `LastSequence = 3` is `03 00 00 80`.
 - A binary column stores 1; its bytes live in stream `Table.Key1[.Key2…]` (integer keys in signed decimal), e.g. `Icon.app.ico`. Write one per non-NULL value.
 
@@ -219,7 +227,7 @@ Unverified:
 
 - Native storage of refcounts above 65535, and its long-reference threshold (65535 or 65536).
 - The oldest engine accepting a UTF-8 database code page (the observed package needs 5.0), and the native column limit (32 assumed).
-- Whether the engine needs sorted rows; transform encoding of dropped tables, columns and wide masks; `MergeModule.CABinet` as a plain `_Streams` entry.
+- Transform encoding of dropped tables, columns and wide masks; `MergeModule.CABinet` as a plain `_Streams` entry. (Sorted rows are required: section 16.)
 
 ## 4. Summary information
 
@@ -237,6 +245,8 @@ Unverified:
 - Each value is `u16 type, u16 0`, then data padded to 4 bytes. VT_I2 (0x0002) is i16 plus 2 zero bytes; VT_I4 (0x0003) is i32.
 - VT_LPSTR (0x001E) is a u32 byte count including the NUL, then the bytes. VT_FILETIME (0x0040) is low and high u32 of 100 ns since 1601 UTC.
 - PID 1 (VT_I2) MUST be present and is read as unsigned (0xFDE9 = 65001). Readers treat VT_EMPTY and VT_NULL as absent.
+- Readers check every value's VT against the PID table below and its byte count against the section size before copying. Crafted packages with a VT_LPSTR count of 0xFFFFFFFF, or a string where a FILETIME belongs, crashed one reader (reported).
+- FILETIME is UTC. A text form such as `.idt`'s `yyyy/mm/dd hh:mm:ss` MUST state its zone or use UTC; converting through local time shifts the value by an hour across daylight saving (reported).
 - Writers MUST use an ANSI code page (874, 932, 936, 949, 950, 1250–1258): the database code page when it is one, else 1252.
 
 | PID | Name | VT | Package value |
@@ -253,6 +263,7 @@ Unverified:
 
 - Omit PIDs 8, 11 and 16 and empty strings; never write 10 or 17. Fail on text the code page cannot represent.
 - Template platform is `Intel`, `x64`, `Intel64`, `Arm` or `Arm64`, spelled exactly; empty means Intel. One language per package; 0 is neutral.
+- There is no architecture-neutral token: a package without 64-bit components uses `Intel`, which installs on every Windows platform. User-facing options SHOULD accept `x86`, `x64` and `arm64` in any case and map them to these tokens, since users repeatedly ask which spelling a tool wants (reported).
 - Page Count: `x64` and `Intel64` need ≥ 200, `Arm64` ≥ 500, `Arm` uses 500; never below 100. Never set Word Count 0x4 (administrative image).
 - Security is 2 for packages and modules, 4 for transforms and patches. A merge module has Title `Merge Module`, its module GUID as Revision Number, and Word Count 0.
 
@@ -285,6 +296,7 @@ Files are stored in MSZIP-compressed Microsoft cabinets, embedded as database st
 - `date = ((year − 1980) << 9) | (month << 5) | day`, `time = (hour << 11) | (minute << 5) | (second >> 1)`, clamped to 0x0021/0x0000 … 0xFF9F/0xBF7D.
 - `attribs`: 0x01 read-only, 0x02 hidden, 0x04 system, 0x20 archive; never 0x40 (execute); 0x80 (UTF-8 name) only when a name byte is ≥ 0x80.
 - `typeCompress` low nibble: 0 none, 1 MSZIP, 2 Quantum, 3 LZX (window 15–21 in bits 8–12). Writers use 1 or 0; real packages used 0x0001 and 0x1503.
+- Readers of other toolchains' packages MUST handle cabinet sets: flags 0x1/0x2 with the previous/next cabinet names, and `iFolder` 0xFFFD–0xFFFF for files continued across cabinets. Retail packages built by other toolchains use them with external LZX cabinets (reported); a reader that lacks them MUST fail with a clear message instead of extracting part of the set.
 
 ```
 cabChecksum(B, seed): acc = seed XOR every whole 4-byte group of B (as LE32)
@@ -307,6 +319,7 @@ Each `ab` is `43 4B` ("CK") plus a raw RFC 1951 stream. Its last block has BFINA
 - Use a fresh writer per block, because `Reset` re-applies the original dictionary. Blocks may be compressed in parallel with identical output.
 - Levels 0 and −2 ignore the dictionary, which is legal. Go 1.27.3 ends each stream with an empty fixed-Huffman final block, which is valid.
 - Decode with `flate.NewReaderDict(ab[2:], last 32768 bytes of history)` and `io.ReadFull` of `cbUncomp` bytes. <!-- codespell:ignore flate -->
+- A wrong history shows up as scattered wrong bytes in otherwise plausible files, or as "invalid chunk" errors in later blocks; an extractor regression did both on a real package (reported). Test decoding on a folder of more than two blocks with matches that reach back across block boundaries, and compare every extracted file with its source.
 
 ### Windows Installer usage
 
@@ -429,7 +442,9 @@ The internal UI is pure data: UI-sequence rows open dialogs, dialogs hold contro
 5. The modeless progress dialog sits just before `ExecuteAction`. The installer publishes `ActionText`, `ActionData`, `SetProgress`, `TimeRemaining` and `ScriptInProgress`; `EventMapping` routes them.
 6. `ControlCondition` rows run when the dialog opens and when a property changes. A false row does nothing, so a toggle needs two complementary rows.
 
-- Wizard pages MUST be modal. `Control_Next` MUST form one closed ring through `Control_First`; static controls may stay out.
+- Wizard pages MUST be modal. `Control_Next` MUST form one closed ring through `Control_First`; static controls may stay out. A broken ring fails at run time with error 2834, "The next pointers on the dialog … do not form a single loop" (reported).
+- Put every non-static control in the ring, including PathEdit and SelectionTree; leaving one out makes it a dead end for the keyboard. Static types are Billboard, Bitmap, GroupBox, Icon, Line, ProgressBar, Text and VolumeCostList. `Control_First` is the first control that takes focus, not the first control drawn.
+- Every `UIText` key a control or the installer uses MUST exist; otherwise the dialog shows "… is missing from the UIText Table" (reported).
 - Active controls (Edit, PathEdit, CheckBox, RadioButtonGroup, ListBox, SelectionTree, …) need a `Property` (error 2819). Bind public properties; make secure the ones the server needs.
 - Write `0` as `ControlEvent.Argument` for events without one. Write condition `1` for "always"; toolchain packages never leave it blank (observed).
 - A style tag MUST start the text; otherwise `DefaultUIFont` applies. ScrollableText holds raw RTF and is never formatted.
@@ -508,6 +523,8 @@ The builder never installs what it builds, so it must enforce at build time ever
 - Per-machine installs always run elevated. Never set Word Count bit 3 (8, no UAC prompt) with per-machine data, services, HKLM writes or no-impersonate actions.
 - Per-user packages MUST pass ICE105: no no-impersonate deferred actions, `SystemFolder`-type Directory keys, GAC assemblies, ODBCDataSource, ServiceInstall or HKLM rows.
 - Platform `x64` or `Intel64` needs Page Count ≥ 200, `Arm64` ≥ 500. Component bit 256 does not move files: on 64-bit Windows `ProgramFilesFolder` is `C:\Program Files (x86)\`, so use `ProgramFiles64Folder` explicitly (ICE80).
+- `Arm64` packages need bit 256 like `x64`: without it their files and registry values land in the 32-bit views (reported). An `x64` package also installs on Arm64 Windows, which runs x64 code under emulation (reported).
+- `ProgramFiles6432Folder` is a WiX v4 alias, not a Windows Installer property. A builder resolves such aliases to `ProgramFilesFolder` or `ProgramFiles64Folder` from the platform and never emits them as Directory keys; otherwise the folder is created literally under `TARGETDIR`.
 
 ### 8.3 Directory resolution (CostFinalize)
 
@@ -541,7 +558,7 @@ The component code is machine-wide: one GUID is one component in every package. 
 2. Both versioned: the higher version wins. At equal versions the product language is favoured, and a language superset is kept.
 3. Both unversioned: skip if `MsiFileHash` matches. Keep B if it was modified after creation; otherwise install A.
 
-- The key file is decided first. The installer trusts the authored `File.Version` and `File.Language`, so copy them from the version resource.
+- The key file is decided first. The installer trusts the authored `File.Version` and `File.Language`, so copy them from the version resource. A builder that leaves `Version` empty for an executable makes it unversioned, and an upgrade then keeps the old binary with "Disallowing installation of component … since the same component with higher versioned keyfile exists" (reported).
 - Unversioned files get no version; fonts get a null Language. A companion file (Version = another File key) follows its parent and is never a key path.
 - `REINSTALLMODE` (default `omus`): `p` missing, `o` older, `e` equal or older, `d` different, `a` all, `c` checksum. Then `u` user registry, `m` machine registry, `s` shortcuts, `v` re-cache the package.
 
@@ -670,6 +687,7 @@ Numbers are Microsoft's suggested ones; where the reference toolchain differs, t
 - RemoveExistingProducts (REP) follows FindRelatedProducts in one of four windows (ICE63). Window 1: between InstallValidate and InstallInitialize (WiX 1401). Window 2: right after InstallInitialize, before any script action (WiX 1501).
 - Window 3: right after InstallExecute(Again) (6550). Window 4: after InstallFinalize (WiX 6601, tutorial 6700).
 - Window 1 removes the old product first and copies reused files again. If removal fails, window 3 rolls back both products and window 4 only the removal.
+- REP anywhere else fails at run time with error 2613, "RemoveExistingProducts action sequenced incorrectly". A relative-scheduling algorithm that appends after-chains wherever a graph walk ends has put REP between InstallServices and StartServices (reported). Section 11.7 keeps every chain next to its anchor; the builder MUST also check the REP window after numbering.
 
 ### 9.3 Table-driven actions
 
@@ -797,7 +815,7 @@ Each WiX concept produces a fixed set of rows; the tool offers the same concepts
 | RemoveFile, RemoveFolder, CreateFolder | `RemoveFile(…, FileName, DirProperty, InstallMode)`; `CreateFolder(Directory_, Component_)` | Install 1, uninstall 2, both 3. Folder removal → `FileName` NULL (observed). Directory defaults to the component's. |
 | CopyFile | `DuplicateFile` for a package file; `MoveFile` for an existing file | `MoveFile.Options` 1 = move, 0 = copy. |
 | Icon, Binary | `Icon(Name, Data)`, `Binary(Name, Data)` | Key ≤ 55 chars, ≤ 18 recommended. `ARPPRODUCTICON` is a plain property. |
-| COM and file associations | Non-advertised (default): `Registry` rows with root 0 (HKCR) | `.ext` = ProgId; `ProgId\shell\verb` = text; `…\command` = `"[#File]" "%1"` (observed). |
+| COM and file associations | Non-advertised (default): `Registry` rows with root 0 (HKCR) | `.ext` = ProgId; `ProgId\shell\verb` = text; `…\command` = `"[#File]" "%1"` (observed). A verb without arguments (DDE) gets `"[#File]"` alone, never a placeholder for the missing value (reported). |
 
 Full detail: chapter 09 §9.2–§9.19.
 
@@ -815,7 +833,9 @@ Full detail: chapter 09 §9.2–§9.19.
 - Conditions: 1296 `Installed AND NOT RESUME AND NOT Preselected AND NOT PATCH`; 1297 `Installed AND (RESUME OR Preselected)`; 1298 `NOT Installed OR PATCH`.
 - Properties: `ErrorDialog`, `DefaultUIFont`, `WixUIRMOption=UseRM` (observed), `ARPNOMODIFY=1` without feature selection (observed). The editable folder property (WiX: `WIXUI_INSTALLDIR`) names a public directory key.
 - No DLLs: path checks use `SetTargetPath` then `CheckTargetPath`; printing uses `MsiPrint`. Layouts and texts are the tool's own; keys reuse WiX names (`WelcomeDlg`, `InstallDirDlg`, `Next`, `Back`).
-- WiX utility features done natively: event-log sources as `Registry` rows, `.url` files as `IniFile` rows, SDDL via `MsiLockPermissionsEx`, failure actions via `MsiServiceConfig*`. WiX's type-65 environment-broadcast action (observed) is not needed.
+- WiX utility features done natively: event-log sources as `Registry` rows, `.url` files as `IniFile` rows, SDDL via `MsiLockPermissionsEx`, service settings via `MsiServiceConfig`. WiX's type-65 environment-broadcast action (observed) is not needed.
+- `MsiServiceConfig` works for delayed auto start (ConfigType 3) and the failure-actions flag (4), with `MsiConfigureServices` at 5850, condition `VersionNT>=600` (reported, Windows Server 2025). `MsiServiceConfigFailureActions` with a restart action failed there with error 1939 (Win32 error 5) and rolled back (reported). Until a Windows experiment shows otherwise, failure actions use a deferred, no-impersonate EXE action running `[SystemFolder]sc.exe failure …` (section 16).
+- Event-log source: under `HKLM\SYSTEM\CurrentControlSet\Services\EventLog\<Log>\<Source>`, write `EventMessageFile`, optional `CategoryMessageFile` with `CategoryCount` and `ParameterMessageFile` (expandable strings, count `#n`), and `TypesSupported` (`#n`). `Security` is not a valid log.
 
 **Unverified (chapter 09):**
 
@@ -867,6 +887,8 @@ Prefixes: `reg` Registry, `rrg` RemoveRegistry, `cmp` Component, `fil` File, `di
 - Observed v3: `reg`, `scp`, `fil`, `cmp`, `dir` + 32 upper-case hex. Observed v5: `reg`, `scp`, `fls`, `d` + 27 characters from `[A-Za-z0-9._]`. Hashes are not expected to match.
 - A file key defaults to the filename if it is a legal identifier unique in the package. A component key defaults to its key-path resource's key.
 - Harvesting uses the identity `"cmp|"`, `"fil|"` or `"dir|"` + path below the harvest root (forward slashes, lower case). It makes one component per file, ordered by name.
+- Normalize harvest paths first: drop empty, `.` and trailing-slash segments. A harvester that kept them emitted directories with an empty name, which broke the build (reported). Identities never use random numbers, so a rebuild gives the same keys (reported).
+- A file without an explicit key whose default key collides with another file's (the same name in two directories) is an error naming both sources, never a silent drop. A builder that lost such File rows wrote components with empty key paths and still exited 0 (reported).
 
 ### 11.3 Directory names and short names
 
@@ -1221,11 +1243,16 @@ Every field MUST map to a documented rule; `wait: true` gives `ServiceControl.Wa
 - W7: Whether `minimal.msi` installs and uninstalls.
 - W8: The engine's per-table column maximum (a 33-column custom table).
 - W9: Stored versus MSZIP cabinets, and a trailing empty final DEFLATE block.
+- W10: `MsiServiceConfigFailureActions` with a restart action on Windows Server 2025, per-machine and elevated: does it still fail with 1939? (section 10.3)
+- W11: A `Property` row moved out of key order, and an unsorted multi-row `Upgrade` table: confirm error 2211 and find which tables the engine checks.
+- W12: A string of 70,000 bytes (license RTF) in both long-entry layouts: the documented one installs, the swapped one fails.
+- W13: An `Arm64` package on Arm64 Windows: Page Count 500, bit 256 on every component, `ProgramFiles64Folder`.
 
 ### Security
 
 - Readers bound allocations by file size, detect FAT, MiniFAT, DIFAT and directory cycles, cap tree depth, and check string-pool and table sizes.
-- Extraction normalizes cabinet names and `DefaultDir` paths and refuses `..`, absolute paths and device names.
+- Extraction normalizes cabinet names and `DefaultDir` paths and refuses `..`, absolute paths and device names. It splits `target:source` and `short|long` first; an extractor that joined raw values wrote names such as `winsxs\…:ulCRTx64` that Windows rejects (reported).
+- File names outside the database code page fail the build with a message naming the file. One builder crashed on a Cyrillic file name with code page 1252 (reported); 65001 or a matching ANSI code page stores it.
 - Harvesting follows no symlinks out of its root unless asked, and reports special files.
 - Private keys never touch temporary files; external signers (PKCS#11, cloud KMS) see only the digest. Reproducible mode never reads the clock.
 
@@ -1311,7 +1338,90 @@ Inputs are exact strings; ␟ is U+001F and hex is upper case.
 
 - That `minimal.msi` installs into `C:\Program Files (x86)\Demo` on Windows and uninstalls (W7). A missing `_Validation` should not block it.
 
-## 16. Full specification
+## 16. Field reports from msitools
+
+msitools (`wixl`, `msibuild`, `msiextract`, `msiinfo`) is the other open-source
+toolchain that writes MSI packages on Linux, and its bug tracker records how
+packages fail on real Windows machines. This section goes through its 99 issues
+and the related merge requests up to 2026-10-25 and turns each relevant one
+into a rule for the tool.
+
+**Provenance.** Only issue texts, merge-request descriptions, commit subjects
+and Windows Installer logs quoted in them were used, as black-box evidence. No
+msitools, libgsf or libgcab source code was read. Merge-request statements that
+cite WiX source files (for example how WiX derives a default File key or
+numbers `ControlEvent` rows) were left out. Facts taken from here carry
+**(reported)** elsewhere in this document.
+
+### 16.1 Bugs and the rules they give
+
+| msitools report | What went wrong | Rule for the tool | Section |
+|---|---|---|---|
+| [#99](https://gitlab.gnome.org/GNOME/msitools/-/issues/99), [!97](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/97) | An inserted `Property` row was stored out of key order; Windows logged error 2211 on `Property`, found no `ProductCode` and failed with 1605 | Sort every table by stored key values on every write; re-sort after editing | 3 |
+| [#60](https://gitlab.gnome.org/GNOME/msitools/-/issues/60), [#53](https://gitlab.gnome.org/GNOME/msitools/-/issues/53) | A writer stored long string-pool entries with swapped words; packages with a license text above 64 KiB did not load ("string table load failed") | Long entry = `0, refcount, low, high`; test with a 70,000-byte string | 3 |
+| [#10](https://gitlab.gnome.org/GNOME/msitools/-/issues/10), [#31](https://gitlab.gnome.org/GNOME/msitools/-/issues/31), [#32](https://gitlab.gnome.org/GNOME/msitools/-/issues/32), [!66](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/66) | String-pool words byte-swapped as 32-bit values on big-endian hosts | Decode every field with its exact width through `encoding/binary`; run the vectors on a big-endian target (`GOARCH=s390x` under QEMU) | 3, 15 |
+| fc2daea (commit) | A CFB library failed to open 0-byte streams in the mini stream, so an empty database could not be reopened | Readers accept size 0 with any start sector; writers use ENDOFCHAIN | 2 |
+| [!82](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/82) | Embedded cabinets of Windows 11 SDK packages were skipped when streams were opened by index | Open streams by decoded name from a full directory walk | 2 |
+| [#33](https://gitlab.gnome.org/GNOME/msitools/-/issues/33)–[#36](https://gitlab.gnome.org/GNOME/msitools/-/issues/36) | Crafted files crashed a reader: FAT entries 0x30303030, huge directory indexes, a VT_LPSTR length of 0xFFFFFFFF, a string where a FILETIME belongs | Bounds and type checks before every copy; add these four shapes to the fuzz seed corpus | 2, 4, 14 |
+| [#57](https://gitlab.gnome.org/GNOME/msitools/-/issues/57) | Summary times printed one hour off across daylight saving | FILETIME is UTC; text forms say so | 4 |
+| [#4](https://gitlab.gnome.org/GNOME/msitools/-/issues/4), [#6](https://gitlab.gnome.org/GNOME/msitools/-/issues/6) | An extractor regression corrupted bytes in most files and stopped with "Invalid cabinet chunk" on a real package | Multi-block MSZIP round-trip tests with cross-block matches; compare extracted files byte for byte | 5 |
+| [#68](https://gitlab.gnome.org/GNOME/msitools/-/issues/68) | A retail package with external LZX cabinet sets (`EURO.cab` → `EURO1.cab`) failed with "Invalid folder index" | Readers handle continued folders or fail clearly; writers never span | 5 |
+| [#5](https://gitlab.gnome.org/GNOME/msitools/-/issues/5), [#68](https://gitlab.gnome.org/GNOME/msitools/-/issues/68) | Extracted paths contained raw `DefaultDir` values such as `name:ulCRTx64` and `ft--8ci7\|ulpCRTx64` | Split `target:source` and `short\|long` before building paths | 6.4, 14 |
+| [#74](https://gitlab.gnome.org/GNOME/msitools/-/issues/74) | A file named `1986ве1т.cfg` crashed the build under code page 1252 | Check every string against the code page and name the offending row | 3, 14 |
+| [#37](https://gitlab.gnome.org/GNOME/msitools/-/issues/37), [#45](https://gitlab.gnome.org/GNOME/msitools/-/issues/45), [!86](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/86) | Before/after scheduling put REP between InstallServices and StartServices (error 2613) and a deferred action before InstallInitialize | Keep each chain next to its anchor (11.7); check REP windows and ICE77 after numbering | 9.2, 11.7 |
+| [#63](https://gitlab.gnome.org/GNOME/msitools/-/issues/63), [!56](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/56), [!108](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/108) | Dialogs failed with error 2834 (tab ring); PathEdit and SelectionTree were not reachable; UIText rows were missing | One closed ring of all non-static controls; every used UIText key present | 7.2 |
+| [!54](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/54), [!108](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/108) | UI sequences named dialogs that were not in the package; a dialog reached only by `SpawnDialog` was left out | Include exactly the dialogs reachable from sequences and events (ICE27, ICE44) | 7.5 |
+| [#42](https://gitlab.gnome.org/GNOME/msitools/-/issues/42), [#65](https://gitlab.gnome.org/GNOME/msitools/-/issues/65), [!89](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/89) | Executables got no `File.Version`, so upgrades kept the old binary | Read the PE version resource; no `MsiFileHash` row for versioned files | 8.6, 11.5 |
+| [#61](https://gitlab.gnome.org/GNOME/msitools/-/issues/61), [!93](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/93) | Arm64 packages without bit 256 installed into 32-bit views; an Arm64 build reportedly failed to open, unresolved | Arm64 is 64-bit for component and search bits; Windows experiment W13 | 8.2 |
+| [#46](https://gitlab.gnome.org/GNOME/msitools/-/issues/46), [#78](https://gitlab.gnome.org/GNOME/msitools/-/issues/78), [#79](https://gitlab.gnome.org/GNOME/msitools/-/issues/79), [#94](https://gitlab.gnome.org/GNOME/msitools/-/issues/94), [#95](https://gitlab.gnome.org/GNOME/msitools/-/issues/95), [!110](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/110) | Users could not tell which architecture spelling to use, or what to pass for a neutral package; command line and source could disagree | One architecture setting, case-insensitive, mapped to the exact Template token; `Intel` for neutral packages | 4, 14 |
+| [#87](https://gitlab.gnome.org/GNOME/msitools/-/issues/87), [#93](https://gitlab.gnome.org/GNOME/msitools/-/issues/93) | `ProgramFiles6432Folder`, a WiX v4 alias, was used with a v3-style toolchain | Resolve aliases at build time | 8.2 |
+| [#93](https://gitlab.gnome.org/GNOME/msitools/-/issues/93) | Files without an explicit key produced no File rows and empty key paths; the build exited 0 | Fail on any component whose key path is missing; never exit 0 with an invalid package | 11.2 |
+| [#75](https://gitlab.gnome.org/GNOME/msitools/-/issues/75), [#96](https://gitlab.gnome.org/GNOME/msitools/-/issues/96), [!90](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/90) | A trailing `/` made the harvester emit empty directory names; random package codes, harvest IDs and times made rebuilds differ | Normalized harvest paths; reproducible mode (11.1) | 11.1, 11.2 |
+| [#70](https://gitlab.gnome.org/GNOME/msitools/-/issues/70) | A verb without arguments produced a command ending in `(null)` | Omit missing arguments | 10.2 |
+| [#9](https://gitlab.gnome.org/GNOME/msitools/-/issues/9), [#39](https://gitlab.gnome.org/GNOME/msitools/-/issues/39), [#98](https://gitlab.gnome.org/GNOME/msitools/-/issues/98) | Environment support was missing, then shipped with `Permanent` inverted, so non-permanent variables stayed after uninstall | `-` means remove on uninstall and is added unless permanent; test both polarities on Windows | 11.9 |
+| [#40](https://gitlab.gnome.org/GNOME/msitools/-/issues/40), [!96](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/96), [!94](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/94) | Secure properties were not listed, so command-line values were lost in managed (Intune, GPO) and elevated installs; hidden properties were logged in clear text | Fill `SecureCustomProperties` and `MsiHiddenProperties` from the model; warn on non-public secure names | 8.7, 10.1 |
+| [!95](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/95) | Every file was vital and `ServiceInstall` could not be | File bit 0x200 by default and clearable; `ErrorControl` +0x8000 on request | 10.2 |
+| [#11](https://gitlab.gnome.org/GNOME/msitools/-/issues/11), [#43](https://gitlab.gnome.org/GNOME/msitools/-/issues/43), [!92](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/92), [!98](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/98) | Service settings and recovery actions were not expressible; the native failure-actions table failed with 1939 | `MsiServiceConfig` for settings; `sc.exe` for recovery (16.2) | 10.3 |
+| [#24](https://gitlab.gnome.org/GNOME/msitools/-/issues/24), [!107](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/107) | No way to add a firewall rule | `netsh` recipe (16.2) | 10.3 |
+| [!106](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/106) | Event-log sources aborted the build | Plain `Registry` rows | 10.3 |
+| [#7](https://gitlab.gnome.org/GNOME/msitools/-/issues/7), [#93](https://gitlab.gnome.org/GNOME/msitools/-/issues/93), [!91](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/91), [#27](https://gitlab.gnome.org/GNOME/msitools/-/issues/27) | A feature without a level crashed the build; unknown or misspelled input was ignored, crashed the build, or failed without saying where; foreign-namespace attributes overrode core ones | Apply documented defaults (feature level 1); unknown keys are errors with a file and line; enum values are case-insensitive | 10.2, 14 |
+
+Not carried over: build, packaging and documentation issues ([#8](https://gitlab.gnome.org/GNOME/msitools/-/issues/8), [#13](https://gitlab.gnome.org/GNOME/msitools/-/issues/13)–[#21](https://gitlab.gnome.org/GNOME/msitools/-/issues/21), [#23](https://gitlab.gnome.org/GNOME/msitools/-/issues/23), [#38](https://gitlab.gnome.org/GNOME/msitools/-/issues/38), [#41](https://gitlab.gnome.org/GNOME/msitools/-/issues/41), [#44](https://gitlab.gnome.org/GNOME/msitools/-/issues/44), [#48](https://gitlab.gnome.org/GNOME/msitools/-/issues/48), [#52](https://gitlab.gnome.org/GNOME/msitools/-/issues/52), [#55](https://gitlab.gnome.org/GNOME/msitools/-/issues/55), [#56](https://gitlab.gnome.org/GNOME/msitools/-/issues/56), [#58](https://gitlab.gnome.org/GNOME/msitools/-/issues/58), [#59](https://gitlab.gnome.org/GNOME/msitools/-/issues/59), [#67](https://gitlab.gnome.org/GNOME/msitools/-/issues/67), [#71](https://gitlab.gnome.org/GNOME/msitools/-/issues/71)–[#73](https://gitlab.gnome.org/GNOME/msitools/-/issues/73), [#80](https://gitlab.gnome.org/GNOME/msitools/-/issues/80)–[#84](https://gitlab.gnome.org/GNOME/msitools/-/issues/84), [#88](https://gitlab.gnome.org/GNOME/msitools/-/issues/88)–[#92](https://gitlab.gnome.org/GNOME/msitools/-/issues/92)), feature requests for WiX elements the tool covers through its own model ([#12](https://gitlab.gnome.org/GNOME/msitools/-/issues/12), [#14](https://gitlab.gnome.org/GNOME/msitools/-/issues/14), [#22](https://gitlab.gnome.org/GNOME/msitools/-/issues/22), [#25](https://gitlab.gnome.org/GNOME/msitools/-/issues/25), [#26](https://gitlab.gnome.org/GNOME/msitools/-/issues/26), [#47](https://gitlab.gnome.org/GNOME/msitools/-/issues/47), [#50](https://gitlab.gnome.org/GNOME/msitools/-/issues/50), [#51](https://gitlab.gnome.org/GNOME/msitools/-/issues/51), [#66](https://gitlab.gnome.org/GNOME/msitools/-/issues/66), [#69](https://gitlab.gnome.org/GNOME/msitools/-/issues/69), [#85](https://gitlab.gnome.org/GNOME/msitools/-/issues/85)), the WiX UI requests ([#1](https://gitlab.gnome.org/GNOME/msitools/-/issues/1)–[#3](https://gitlab.gnome.org/GNOME/msitools/-/issues/3), [#28](https://gitlab.gnome.org/GNOME/msitools/-/issues/28), [#49](https://gitlab.gnome.org/GNOME/msitools/-/issues/49), [#62](https://gitlab.gnome.org/GNOME/msitools/-/issues/62)), SQL and command-line bugs of msitools' own tools ([#29](https://gitlab.gnome.org/GNOME/msitools/-/issues/29), [#30](https://gitlab.gnome.org/GNOME/msitools/-/issues/30), [#54](https://gitlab.gnome.org/GNOME/msitools/-/issues/54), [#64](https://gitlab.gnome.org/GNOME/msitools/-/issues/64)), [#77](https://gitlab.gnome.org/GNOME/msitools/-/issues/77) (MSIX) and [#97](https://gitlab.gnome.org/GNOME/msitools/-/issues/97) (WiX fragment parsing).
+
+### 16.2 Native recipes for service recovery and firewall rules
+
+Both use EXE custom actions that ship with Windows, so they keep the "no custom-action DLLs" rule. Both were checked by installing and uninstalling on Windows Server 2025 (reported).
+
+**Service recovery actions.**
+
+1. A type-51 action, scheduled once, sets a property to `[SystemFolder]sc.exe`.
+2. A type-50 action, deferred and no-impersonate (50 + 1024 + 2048 = 3122), uses that property as `Source`. Its `Target` is `failure "<service>" reset= <seconds> actions= restart/<ms>/restart/<ms>/…`.
+3. Schedule it after InstallServices (else after InstallFiles, else after InstallInitialize), with condition `$<Component> > 2`: installed locally or run from source.
+
+- Give a delay only to `restart` actions. Leave out trailing `none` actions, and reject a `none` between two other actions, which `sc.exe` cannot express.
+- Quote arguments the way the C runtime parses them: double the backslashes before a quote and at the end of a value. `Target` is limited to 255 characters, so warn when the formatted line may exceed it.
+- A failing `sc.exe` fails the install. Rollback does not restore the previous recovery actions; record this as a known gap.
+
+**Firewall rules.**
+
+- Run `netsh advfirewall firewall …` from `[System64Folder]` in 64-bit packages and `[SystemFolder]` otherwise, as deferred, no-impersonate EXE actions.
+- On install and repair, delete every rule by name and direction first, then add each rule; a rollback action deletes what was added. Delete all rules before adding any, so a TCP and a UDP rule with one name survive.
+- On removal, delete by name and direction only, because a port or address taken from a property may differ at maintenance time; a rollback action adds the rule back. Deleting never fails the install (Continue, 64).
+- Rules name a program (`program="[#File]"`) or a port and protocol (TCP by default), with remote addresses or a scope and a profile (all by default).
+- Unverified: removing only the feature (`REMOVE=<Feature>`) when the port came from a property.
+
+### 16.3 "This installation package could not be opened" (1620)
+
+Several reports ([#61](https://gitlab.gnome.org/GNOME/msitools/-/issues/61), [#76](https://gitlab.gnome.org/GNOME/msitools/-/issues/76), [#86](https://gitlab.gnome.org/GNOME/msitools/-/issues/86)) end with this message, a verbose log line `Note: 1: 2203 2: <path> 3: -2147287039` and `MainEngineThread is returning 1620`. The engine then failed to open the compound file at all, before reading any table. In [#76](https://gitlab.gnome.org/GNOME/msitools/-/issues/76) the package was fine; the cause was the test machine, and a Windows CI job SHOULD rule out these first:
+
+1. The file was damaged in transfer: compare its SHA-256 with the build output.
+2. It is on a network share, or `msiexec` got a relative path: copy it locally and pass an absolute path.
+3. It carries the downloaded-file mark: run `Unblock-File`.
+4. Security software rewrote or locked it.
+
+A policy block gives a different message ("The system administrator has set policies to prevent this installation"). Only when all four are ruled out is the container suspect; then `inspect` and an independent reader (section 15) SHOULD find the fault. [#86](https://gitlab.gnome.org/GNOME/msitools/-/issues/86) came from a third toolchain and [#61](https://gitlab.gnome.org/GNOME/msitools/-/issues/61) was never resolved.
+
+## 17. Full specification
 
 This document is a summary. The full specification is not part of this
 repository; its chapters are:
