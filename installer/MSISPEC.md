@@ -222,6 +222,14 @@ Unverified:
 - The oldest engine accepting a UTF-8 database code page (the observed package needs 5.0), and the native column limit (32 assumed).
 - Transform encoding of dropped tables, columns and wide masks; `MergeModule.CABinet` as a plain `_Streams` entry. (Sorted rows are required: section 16.)
 
+### Lossless MSI database serialization
+
+An MSI database declares its string encoding through the `_StringPool` code page. Stored string bytes must use that code page, not an implicit programming-language encoding. The long-reference flag, string ID width (two or three bytes), extended string lengths, refcounts, and physical table row widths must agree everywhere, including `_Tables` and `_Columns`. An encoder must either represent the requested value correctly or return an explicit error: truncating lengths, saturating counts, wrapping IDs, replacing undecodable text, or silently substituting another code page is not a successful serialization.
+
+**Column-major layout also applies to system catalogs**. A reader must not parse `_Columns` as row-major records. Unknown tables, empty catalog entries, binary payload streams, embedded sub-storages, and signed-content streams must remain distinguishable. A read-modify-write implementation must either preserve these objects or explicitly report unsupported preservation; do not silently drop data while returning success.
+
+These are **format and integrity requirements for a conforming/lossless serializer**, not claims that every out-of-range or malformed variant is accepted by native Windows. Native API acceptance remains a separate Appendix B experiment.
+
 ## 4. Summary information
 
 `\u0005SummaryInformation` (literal name) is a one-section property set from which the installer reads platform, language, package code, minimum version and source type.
@@ -407,6 +415,10 @@ Validators (ICE03, ICE06, ICE32) read `_Validation`, the installer does not, and
 - What to write when an `MsiFileHash` word is 0x80000000 (default: omit the row).
 - Handling of malformed registry `#` values (builders SHOULD reject them).
 - An `Environment` name with no prefix character (assumed `=-`).
+
+### 6.5 MsiFileHash table identity and hash provenance
+
+The documented standard table is **`MsiFileHash`**, not `FileHash`. Its columns are `File_`, `Options`, `HashPart1`, `HashPart2`, `HashPart3`, `HashPart4`. The row applies to **unversioned files**, `Options` is zero, and the four hash words should come from the native `MsiGetFileHash` API (or the Installer `FileHash` method), not an assumed byte mapping from a generic MD5 implementation. A nonstandard `FileHash` table is not interchangeable with `MsiFileHash`. Verify table identity, raw values and native repair behavior independently. [Microsoft table specification](https://learn.microsoft.com/en-us/windows/win32/msi/msifilehash-table).
 
 ## 7. User interface
 
@@ -1080,6 +1092,10 @@ A Windows CI job with a self-signed test certificate settles the rest (chapter 1
 - Order of a name that is a proper prefix of another (spec: shorter first; writer SHOULD warn); position of P (conflict; spec: sorted).
 - Low-dword sizes for streams ≥ 4 GiB; layout independence on Windows; `MsiDigitalSignature.Hash` content; the signed-cabinet reserve layout.
 
+### Signatures and edit/rewrite operations
+
+An MSI can be structurally readable while its existing Authenticode signature becomes invalid after editing or repacking. Editors must either preserve and **reverify** relevant signature streams after modifications or explicitly remove/replace stale signatures and report the changed signing status. Signed-content streams must not be silently treated as payload cabinets; successful self-round-trip tests are not signature verification.
+
 ## 13. WiX v4 and later
 
 These are WiX producer-specific output comparisons. R1–R26 are optional reference-profile choices, not normative Windows Installer format requirements.
@@ -1291,6 +1307,25 @@ The supplied x64 samples were inspected statically. msi.dll exports MsiOpenDatab
 | msi.dll | `9dc1f04c61d910baa8e7ec18421359249a27ab9894d96f8f1c8d7ee771b6625c` |
 | msiexec.exe | `6c63cfd4cb36998e9ff763117d4a74193ba72a5fc7f51ea7210f9065c2188452` |
 | cabinet.dll | `9e5e94280b3f6f4249ce4f1e78625372a66f01fefa3d2132a180f84c5c4ba7ff` |
+
+### 16.4 Further implementation audit: SamuelMarks/msi-rs
+
+**Source-inspection findings, not Windows test outcomes.** Reviewed commit [`06658371eeef65edee451a51b0c5abe975192bf7`](https://github.com/SamuelMarks/msi-rs/tree/06658371eeef65edee451a51b0c5abe975192bf7). These observations motivate targeted **RUST-** cases in Appendix B. A source-level unsafe conversion is established by code inspection; native installer rejection and public-API impact require reproduction.
+
+| Area and source | Observed code path | Generalized conformance hazard | Cases |
+| --- | --- | --- | --- |
+| [String pool](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/database/string_pool.rs) | Serializes each string length as `bytes.len() as u16`, caps refcounts at 65535, parses each four-byte entry normally and decodes with `String::from_utf8_lossy` | Long strings, overflow and declared-code-page fidelity require exact boundaries and no silent corruption | RUST-01–04 |
+| [Package serialization](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/package.rs) | Creates CP1252 string pool even though pool writer emits UTF-8 bytes, calls record serialization with 2-byte IDs, and uses native-sized assumptions | Real code pages and long references must be validated against an independent decoder | RUST-03–05 |
+| Same package reader | `_Columns` parsed in row chunks, while regular tables are explicitly decoded column-major; malformed records may be skipped | Catalog decoding errors can cause incomplete or misleading table schema reconstruction | RUST-06–07 |
+| Same package reader/writer | Non-table streams are placed in an embedded-cabinet map and emitted on rewrite; nested storages are read but not restored in `to_bytes`; empty tables are dropped | A successful parse/rewrite must not lose opaque streams, binary columns, empty tables or nested storages | RUST-08–10, RUST-18 |
+| [Table definitions](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/database/tables/core.rs) and [binder](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/wix/linker/binder.rs) | Declares and writes `FileHash` instead of `MsiFileHash`; computes MD5-derived words directly | Standard table name and native hash semantics must be checked against Windows, not a self-test | RUST-11–12 |
+| Same binder | `writer.build().unwrap_or_default()` can turn CAB generation failure into zero bytes; unresolved inputs can be skipped; `File.Sequence` is bounded with an `i16::MAX` fallback | Missing resources and overflow must fail visibly; media sequence/order needs native install verification | RUST-13–15 |
+| [CAB writer](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/cab/writer.rs) | Uses fixed CAB timestamps and substitutes raw blocks if LZX state initialization fails | Output metadata, compressed-block encoding and error propagation require independent FDI checks | RUST-16 |
+| [Package metadata paths](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/package.rs) | A construction path sets SummaryInformation RevisionNumber to ProductCode, another derives a package code separately | PackageCode and ProductCode are distinct identities; test rebuilds and upgrades | RUST-17 |
+| [CFB reader](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/cfb/reader.rs) | Nested-storage extraction traverses sibling children and uses `unwrap_or_default()` on stream read failures | Recursive sub-storage preservation and error fidelity must be demonstrated | RUST-18 |
+| [Stream name codec](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/cfb/stream_name.rs) | Encoder rejects non-64-alphabet characters instead of writing literal UTF-16 units | Encoding must handle valid literal characters and correct packed segments without silent renames | RUST-20 |
+
+**Scope:** The project advertises a broad replacement for WiX and Windows Installer. The table above does not assert that all those features are incomplete. It identifies observable paths with interoperability risk that should be checked on a dev VM against Microsoft's engine, native Cabinet FDI, and an independent reader. Do not treat self-roundtrip or unit-test coverage numbers as proof of native MSI acceptance.
 
 ## 17. Reference chapters
 
