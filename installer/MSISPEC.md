@@ -1418,9 +1418,38 @@ The detailed chapters and schema files referred to above are not contained in th
 | INT-02 | P1 | S/A | WiX MSI round-tripped by libmsi and then native commit | Compare raw streams/decoded tables and native file extraction after each round trip; note semantic vs incidental changes. | Not run |
 | INT-03 | P1 | S/A | Minimized failures from msitools bug tracker | Run identical malformed input through native MSI API, msitools and independent CFB/CAB reader; distinguish bugs from Windows rejection. | Not run |
 
+### msi-rs-specific regression cases (additional)
+
+These 20 cases supplement the original 57. They are **test hypotheses** motivated by code review at `SamuelMarks/msi-rs@06658371`, not recorded Windows results. Agents must reproduce results using independent fixtures/native Windows, report unsupported implementation features separately from invalid MSI format, and leave every outcome `Not run` until executed.
+
+| ID | Priority | Levels | Controlled fixture / variants | Steps and question to settle | Result |
+| --- | :---: | :---: | --- | --- | --- |
+| RUST-01 | P0 | S/A | 65535- and 65536-byte pooled string with adjacent strings | Compare native-written string-pool extended length encoding and independent parsing. Detect truncated 16-bit length and corruption of next entry. | Not run |
+| RUST-02 | P1 | S/A | One string referenced 65535, 65536, 70000 times | Generate unique-key table referencing same value. Inspect stored refcount and native query completeness; a writer must reject overflow rather than clamp silently. | Not run |
+| RUST-03 | P0 | S/A | String IDs 65534–65537 in catalog and user tables | Generate enough distinct strings to cross reference width threshold. Verify long-reference flag and 3-byte references in all table streams; detect 16-bit ID truncation. | Not run |
+| RUST-04 | P0 | S/A | CP1252 `0xE9` and `0x80`, valid UTF-8 equivalents | Read/write matching independent MSI fixtures; compare Unicode values from native queries, byte-exact decoded strings and no lossy replacement. | Not run |
+| RUST-05 | P0 | S/A/I | DB code page 1252 or 65001; non-ASCII Property, File name, table text | Serialize/reopen through candidate tool; inspect code-page header and raw string bytes, native query and installed path. Reject invalid code-page/encoding combinations. | Not run |
+| RUST-06 | P0 | S/A | Native `_Columns` with at least four different ordinal/name/type rows | Decode raw column-major catalog, reconstruct schema with candidate reader, then write/reopen. Compare every schema row against native Windows export. | Not run |
+| RUST-07 | P0 | S/A | Valid catalog plus one malformed catalog row | Test parser errors, incomplete schema detection and whether roundtrip silently drops bad rows. Accept only explicit loss/error policy. | Not run |
+| RUST-08 | P0 | S/A/I | MSI with empty table, Binary DLL, Icon stream and embedded CAB | Read/write unmodified MSI. Compare table catalog membership, every non-summary stream SHA-256, installed file and binary reference resolution. No silent data loss. | Not run |
+| RUST-09 | P1 | S/A | MSI with nested sub-storage and unknown opaque root stream | Compare full tree of names, stream contents and storage CLSIDs before/after rewrite; missing object must produce explicit error if preservation unsupported. | Not run |
+| RUST-10 | P0 | S/A | RSA signed MSI, with and without MsiDigitalSignatureEx | Read/save without requested content changes. Verify via signtool and `Get-AuthenticodeSignature`, compare signature streams and record explicit invalidation/removal if rewritten. | Not run |
+| RUST-11 | P0 | S/A/I | Unversioned file with documented `MsiFileHash` vs wrong `FileHash` | Create both variants with otherwise identical tables, native open and install/repair corrupted file. Establish table name and runtime consumption. | Not run |
+| RUST-12 | P0 | S/A | Empty, ASCII and binary files with native hash as control | Compare all four 32-bit `MsiGetFileHashW` outputs to generated table fields, including signed interpretation and endianness. Do not assume plain MD5 split suffices. | Not run |
+| RUST-13 | P0 | S/A | Missing source file and stale CAB from prior build | Build with one missing required File source; confirm nonzero failure and no valid-looking MSI with missing payload. Inspect File, Media and CAB contents. | Not run |
+| RUST-14 | P0 | S/A | Injected CAB writer failure or invalid compression input | Force packaging error and verify error propagation; reject zero-length CAB with successful build result. Then extract control CAB with FDI. | Not run |
+| RUST-15 | P1 | S/A/I | Multi-CAB File.Sequence across 32767 boundary and permuted files | Compare every File.Sequence with physical cabinet entry order and Media.LastSequence. Detect duplicate or clamped sequences; verify native installation on supported size. | Not run |
+| RUST-16 | P1 | S/A | LZX valid vs invalid window; raw and MSZIP CAB controls | Inspect CFFOLDER compression type and actual CFDATA bytes; call native FDI. Mislabeled raw blocks or silent compressor fallback fail. | Not run |
+| RUST-17 | P0 | S/A/I | Rebuild MSI with same ProductCode, different PackageCode; shared UpgradeCode | Check Property.ProductCode, PID 9 package GUID and related-product behavior with native query, install and repair; distinguish identities. | Not run |
+| RUST-18 | P1 | S/A | Nested storage with grandchild, stream and broken chain variant | Extract recursively and compare all stream hashes and CLSIDs; report read failures instead of returning empty bytes. | Not run |
+| RUST-19 | P1 | S/A | Identical inputs, fixed timestamps and IDs, shuffled insertion order | Build in at least 20 fresh processes and two hosts if possible. Compare raw hashes, object ordering and logical table equality. Mark nondeterminism as producer behavior. | Not run |
+| RUST-20 | P1 | S/A | Stream names with valid literal `-` and Unicode BMP characters plus packed alphabet | Construct native-readable CFB names within 31 UTF-16 units; verify codec preserves valid literal characters and packed segments on roundtrip. | Not run |
+
 ### Suggested order and dependencies
 
-Start with `ENV-01`, `ENV-02`, `DB-01`, `CAB-01` and `RUN-01`; no malformed-input, signature or cross-implementation finding should be accepted without a working control. Run structural and API stages before the installation stage. Use a separate VM snapshot for each test that installs, upgrades, writes Registry keys, changes environment, starts a service, or modifies test-certificate trust.
+Start with `ENV-01`, `ENV-02`, `DB-01`, `CAB-01`, `RUN-01`, `RUST-06`, `RUST-08` and `RUST-11`; no malformed-input, signature or cross-implementation finding should be accepted without a working control. Run structural and API stages before the installation stage. Use a separate VM snapshot for each test that installs, upgrades, writes Registry keys, changes environment, starts a service, or modifies test-certificate trust.
+
+**Additional coverage:** `RUST-01` through `RUST-20` test the interoperability hazards in §16.4; these do not supersede the native experiments W1–W13.
 
 **Mapping to section 14 experiments:** W1=`CFB-07`; W2=`DB-08`/`SUM-03`; W3=`DB-05`; W4=`SUM-02`; W5=`RUN-03`/`RUN-04`; W6=`SIG-02`/`SIG-04`/`SIG-05`; W7=`RUN-01`; W8=`DB-07`; W9=`CAB-01`/`CAB-03`; W10=`CFB-03`/`DB-03`; W11=`SUM-03`/`SUM-04`; W12=`RUN-02`; W13=`RUN-07`.
 
