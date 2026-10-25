@@ -1,9 +1,6 @@
-# MSI and WiX: clean-room specification summary
+# Windows Installer format and interoperability specification
 
-This document summarizes a clean-room specification for building Windows
-Installer packages (`.msi`) with a pure-Go tool. It covers the MSI file format
-from the bytes up, what Windows Installer does with a package at install time,
-and what WiX v3 and later generate from their high-level concepts. The full
+This document describes Windows Installer package formats, on-disk structures, database semantics, engine behavior and interoperability. Microsoft specifications, native Windows behavior, WiX observations and GNOME msitools observations are treated as separate kinds of evidence. The full
 specification has 13 chapters, a test-vector appendix and machine-readable
 schemas for the 97 standard tables and the UI tables. References such as
 "ch. 05 §4" point into it.
@@ -13,7 +10,7 @@ As of 2026-10-25.
 ## Contents
 
 - [Purpose and scope](#purpose-and-scope)
-- [1. How an MSI file is built](#1-how-an-msi-file-is-built)
+- [1. MSI package structure](#1-msi-package-structure)
 - [2. Container: Compound File Binary](#2-container-compound-file-binary)
 - [3. Database storage](#3-database-storage)
 - [4. Summary information](#4-summary-information)
@@ -26,47 +23,42 @@ As of 2026-10-25.
 - [11. WiX v3 build semantics](#11-wix-v3-build-semantics)
 - [12. Digital signatures](#12-digital-signatures)
 - [13. WiX v4 and later](#13-wix-v4-and-later)
-- [14. Implementation guide for a Go builder](#14-implementation-guide-for-a-go-builder)
+- [14. Conformance and verification](#14-conformance-and-verification)
 - [15. Test vectors and verification](#15-test-vectors-and-verification)
 - [16. Field reports from msitools](#16-field-reports-from-msitools)
 - [17. Full specification](#17-full-specification)
 
 ## Purpose and scope
 
-The specification gives enough detail to build a pure-Go MSI builder without
-any other source. The builder is a library plus a CLI that runs on Linux, macOS
-and Windows, much as nFPM does for `.deb` and `.rpm` packages.
+This is a language- and tool-independent reference for reading, writing, validating and installing MSI packages. It does not prescribe an implementation, CLI, authoring syntax or compression library.
 
-| In scope | Out of scope |
+| Topic | Scope |
 | --- | --- |
-| Reading and writing `.msi` files: compound file, database storage, summary information, cabinets | Parsing WiX XML or any other toolchain's source language |
-| The full standard table schema, UI tables, runtime behaviour, standard actions, sequencing, custom-action types, ICE rules | Shipping custom-action DLLs |
-| What WiX generates from high-level concepts: IDs, GUIDs, short names, file metadata, media, sequences, `_Validation`, upgrade rows, UI sets | Creating transforms and patches, merging merge modules, bundles, LZX compression (first version) |
-| Authenticode signing of MSI files, test vectors | |
+| Format | Compound File Binary, MSI relational storage, summary information, cabinets, tables and streams |
+| Behavior | Windows Installer properties, actions, components, upgrades, UI and validation |
+| Related formats | MSI, MSM, MST, MSP and PCP differences where supported by evidence |
+| Interoperability | Native Windows Installer, WiX and GNOME msitools behavior |
 
-Three constraints shape the design:
+### Evidence terminology
 
-- **No XML parsing.** The tool reads its own configuration; section 14 sketches
-  a YAML format. WiX is the model for what to generate, not an input format.
-- **No custom-action DLLs.** Everything uses built-in Windows Installer
-  features: service installation, environment, registry, upgrade tables and
-  standard actions.
-- **Clean room.** The sources are Microsoft Learn, the Microsoft Open
-  Specifications ([MS-CFB], [MS-OLEPS], [MS-MCI]) and the Cabinet SDK
-  documentation, plus black-box comparison of packages built by WiX 3.11 and
-  WiX 5.0.2 with the inputs they were built from. No WiX source code was used.
-  Whoever implements the specification must not open `github.com/wixtoolset`,
-  or use other third-party MSI, compound-file or cabinet code as a source.
+- **Normative:** grounded in a named Microsoft specification or documented Windows Installer API contract.
+- **Observed (Windows):** reproduced with the native Windows Installer API, installer runtime or analyzed binary behavior.
+- **Observed (WiX / msitools):** reproduced for a named version of that producer or reader; not a universal MSI requirement.
+- **Reported:** described in a third-party issue, log or commit but not independently reproduced.
+- **Unverified:** needs a repeatable native compatibility test.
+- **Recommended:** an optional interoperable or deterministic output profile, not a Windows Installer mandate.
 
-Conventions: MUST, SHOULD and MAY follow RFC 2119. Integers are little-endian
-unless stated. **(observed)** marks a fact confirmed on real packages built by
-WiX or written by the native Windows Installer engine. **(reported)** marks a
-Windows Installer behaviour taken from a public msitools bug report or merge
-request whose author ran the package on Windows (section 16). **Unverified**
-marks a point that could not be confirmed; each one names the default to
-implement.
+MUST, SHOULD and MAY use RFC 2119 terminology only within the declared scope of a rule. Successful parsing, successful native API opening and successful installation are distinct conformance levels. A reference writer's deterministic bytes do not define the only valid encoding.
 
-## 1. How an MSI file is built
+### Sources and limitations
+
+- [Microsoft Windows Installer](https://learn.microsoft.com/en-us/windows/win32/msi/windows-installer-portal), [MS-CFB](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/) and [MS-OLEPS](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-oleps/).
+- [GNOME msitools](https://github.com/GNOME/msitools): portable MSI database reading/writing through libmsi, based on a subset of Wine's implementation.
+- [WiX Toolset](https://github.com/wixtoolset/wix): producer-specific MSI authoring, binding, validation and native MSI database interoperability.
+- Native Windows msi.dll, msiexec.exe and cabinet.dll: investigation targets; identifying exports does not prove internal algorithms.
+
+Earlier reference hashes and toolchain output comparisons are retained as historical evidence, but should not be promoted to universal requirements without identifying sample hashes, versions and reproduction steps.
+## 1. MSI package structure
 
 An `.msi` file is a relational database stored as streams inside a Microsoft
 Compound File, with the payload in embedded cabinets.
@@ -307,7 +299,7 @@ csum = cabChecksum(LE16(cbData) ‖ LE16(cbUncomp) ‖ reserve, cabChecksum(ab, 
 
 Without a reserve, `csum = cabChecksum(ab, 0) XOR (cbData | cbUncomp << 16)`. `csum = 0` means "not computed": readers skip it, and writers SHOULD always compute it. Vectors: `Hello, cabinet!\r\nMSI\r\n` (22 bytes) gives 0x25411F35; Microsoft's sample cabinet gives 0x30A65ABD.
 
-### MSZIP with Go's DEFLATE package
+### MSZIP and DEFLATE compatibility
 
 Each `ab` is `43 4B` ("CK") plus a raw RFC 1951 stream. Its last block has BFINAL = 1 and ends byte-aligned, with nothing after it. `cbData` MUST be ≤ 32780, and the 32 KiB history carries across a folder's blocks, resetting at each new folder.
 
@@ -335,7 +327,7 @@ Each `ab` is `43 4B` ("CK") plus a raw RFC 1951 stream. Its last block has BFINA
 ### Determinism and test vectors
 
 - Dates come from an explicit instant in UTC fields, default 1980-01-01 (0x0021/0x0000). Use setID 0 or a derived value and fixed attribs 0x0020.
-- Output is a pure function of chunk, dictionary, level and Go version. Pin the encoder for cross-version reproducibility.
+- Reference MSZIP bytes depend on the DEFLATE encoder and its version; different valid encoders may produce different byte streams.
 - Stored cabinet (chapter 04 §16.2): `fil_a` (`Hello, cabinet!\r\n`), `fil_b` (`MSI\r\n`), setID 0x1234, 2024-06-15 13:45:30, attribs 0x20/0x21. 118 bytes, SHA-256 `81e6018c16afa762ca19768c9c3ce0eed5aa44b5ef26ea555da92a248bbe4ace`.
 - MSZIP cabinet (§16.3): `fil_readme` (28 bytes) and `fil_data` (70000) give blocks of 32768, 32768 and 4492. Go 1.27.3 level 9: 3310 bytes, SHA-256 `d325dfc5a0f4310ee08bf54d8d7dfb98e4586cc601240574d8baf7be10f22cec`. Random data takes the stored fallback (`cbData` 32775).
 
@@ -502,7 +494,7 @@ The error dialog needs the Error bit and a Text control `ErrorText` as `Control_
 
 ## 8. Installer runtime
 
-The builder never installs what it builds, so it must enforce at build time every rule the installer only checks on a customer's machine. Full detail: chapter 07.
+Static package validation and Windows runtime tests verify different properties. Accepting a database does not by itself establish installation compatibility. Full detail: chapter 07.
 
 ### 8.1 Identity codes
 
@@ -622,7 +614,7 @@ Prefer A or B. Minor upgrades install with `msiexec /i new.msi REINSTALL=ALL REI
 - A deferred action sees only `CustomActionData`, `ProductCode` and `UserSID`. To pass data, a type 51 action sequenced before it sets a property named like the deferred action.
 - On failure the rollback script restores the machine. Sequence a rollback action (1280) before the action it undoes; commit actions (1536) run after success. With `RollbackDisabled`, neither runs.
 
-### 8.12 Builder checklist (full list: chapter 07 §13)
+### 8.12 Package consistency checklist (full list: chapter 07 §13)
 
 1. Emit one root `TARGETDIR` with DefaultDir `SourceDir`, and an 8.3 short name for every long name.
 2. Reject two components that install the same file or registry value.
@@ -1089,7 +1081,7 @@ A Windows CI job with a self-signed test certificate settles the rest (chapter 1
 
 ## 13. WiX v4 and later
 
-Most changes to generated output since WiX v3 arrived in v4 and v5, and the tool follows its own default policy, R1–R26.
+These are WiX producer-specific output comparisons. R1–R26 are optional reference-profile choices, not normative Windows Installer format requirements.
 
 Evidence: WiX documentation (no source code), WiX 3.11 packages, and a WiX 5.0.2-built package (x64, per-machine, several embedded cabinets). "(obs)" marks facts seen in that package; "(docs)" marks documentation only. Full detail: chapter 13.
 
@@ -1126,9 +1118,9 @@ Evidence: WiX documentation (no source code), WiX 3.11 packages, and a WiX 5.0.2
 
 Unchanged (obs): `_Validation` rows (four descriptions differ only in whitespace), `MsiFileHash` for every unversioned file, the PID 6 sentence, automatic key paths and registry encoding. Relative scheduling matches v3 plus the anchor rule; full detail: chapter 13 §6.
 
-### Recommendations R1–R26
+### Optional reference output profile R1–R26
 
-| # | Tool default | # | Tool default |
+| # | Reference profile choice | # | Reference profile choice |
 |---|---|---|---|
 | R1 | Database code page 1252 if all text fits, else 65001 | R14 | Directory short names without extension |
 | R2 | Summary code page 1252, never 65001 | R15 | File order: directory path (case-insensitive), name (ordinal), File key |
@@ -1153,114 +1145,49 @@ Unchanged (obs): `_Validation` rows (four descriptions differ only in whitespace
 - Summary and v3: PID 19 and multi-language PID 7 in v4+; v3 defaults for PID 3 and 5; v3 `CreateFolder` for empty components.
 - Other: the v4+ Restart Manager dialog; branching after-lists and collisions in scheduling; whether the observed package matches its authoring.
 
-## 14. Implementation guide for a Go builder
+## 14. Conformance and verification
 
-The tool is a pure-Go library plus CLI, built bottom-up from the container and tested at each layer against vectors and Windows.
+### Conformance levels
 
-It builds `.msi` (later `.msm`) on Linux, macOS and Windows without an installer engine, .NET or external compiler. Non-goals for v1: WiX XML input, shipped custom-action DLLs, transforms, patches, bundles, merge-module merging and LZX. Full detail: chapter 12.
+1. **Structural:** validate CFB sectors and trees, MSI table catalog, string pool, summary information and cabinets with independent readers.
+2. **Native API:** verify MsiOpenDatabase, MsiDatabaseOpenView, MsiViewExecute and MsiDatabaseCommit results and capture errors. Opening a database is not evidence it installs.
+3. **Runtime:** exercise msiexec install, repair, uninstall, upgrades and policy-dependent behavior on specified Windows builds and architectures.
 
-### Packages
+### Cross-implementation matrix
 
-| Layer | Package | Responsibility |
-|---|---|---|
-| CLI | `cmd/<tool>` | `build`, `inspect`, `extract`, `harvest`, `validate`, `sign`, `verify` |
-| Model | `model` | high-level API: package, directories, components, files, features, registry, shortcuts, services, upgrades, searches, native custom actions, UI sets |
-| Generation | `bind` | identities, summary, short names, file metadata, key paths, GUIDs, sequencing, media, sequence tables, `_Validation` |
-| Generation | `ui`, `harvest` | built-in dialog sets of the tool's own design, no DLLs; directory tree → one component per file |
-| Checks | `validate` | static checks: ICE subset, component and sequencing rules |
-| Database | `schema`, `msidb`, `suminfo` | schema generated from `schema/*.json`; tables, string pool, catalog, streams, sub-storages; summary property set |
-| Storage | `cfb`, `cab`, `pe` | compound file with deterministic writer; stored and MSZIP cabinets via Go's standard DEFLATE package; PE version resources |
-| Signing | `sign` | digest, pre-hash, PKCS#7, external-signer hooks |
+| Implementation | Value as evidence | Limitation |
+| --- | --- | --- |
+| Microsoft specifications | Normative file-format and documented API definitions | Does not specify every undocumented runtime choice |
+| Windows msi.dll / msiexec.exe | Native database and installation behavior | Depends on version, context and policy |
+| cabinet.dll FCI / FDI | Cabinet compression and decompression interoperability | CAB acceptance does not establish valid MSI media sequencing |
+| GNOME msitools / libmsi | Portable independent MSI reader/writer and negative fixtures | Partly derived from Wine, not authoritative Windows runtime |
+| WiX Toolset | Real producer output and Windows MSI interop | Default values and algorithms may be toolchain-specific |
 
-Lower layers never import higher ones; `cfb`, `cab`, `msidb`, `suminfo` and `pe` work standalone. Use the standard library plus a small internal DER writer; v1 may support only code pages 1252 and 65001. `build` runs load → expand → bind → validate → write (`msidb`, then `cfb`) → sign last.
+### Native experiments
 
-### Configuration sketch
+- W1: CFB v4 files above 2 GiB and the Windows-native writer threshold.
+- W2: UTF-8 database code page across installer versions and summary PID 1 alternatives.
+- W3: String-pool refcounts exceeding 65535.
+- W4: Multiple language IDs in the Template Summary property: API acceptance versus installability.
+- W5: Native major-upgrade and downgrade sequences.
+- W6: MSI Authenticode signature ordering, DSE placement and nested storages.
+- W7: Installation, repair and removal of the minimal test package.
+- W8: A custom table with 33 columns: create, commit, reopen and runtime.
+- W9: Stored and MSZIP CAB edge cases including continuation folders.
+- W10: Empty streams, unsorted table rows and varied CFB directory trees.
+- W11: Summary code pages, VT_LPWSTR values and architecture tokens.
+- W12: Versioned file replacement and component key-path behavior.
+- W13: Arm64 component flags and registry redirection.
 
-```yaml
-name: Example Exporter
-manufacturer: Example Corp
-version: 1.4.2              # or version_from_file: bin/exporter.exe
-upgrade_code: "{8F1C7A40-6D1E-4B7A-9E43-2C0D7E5B1A11}"
-platform: x64               # Template, 64-bit components, ProgramFiles64Folder
-scope: perMachine           # ALLUSERS=1
-compression: mszip          # none | mszip | high (MSZIP level 9; WiX's "high" means LZX)
-major_upgrade: { allow_downgrades: false, schedule: afterInstallValidate }
-directories: [{ id: INSTALLDIR, parent: ProgramFiles64Folder, path: Example\Exporter }]
-components:
-  - directory: INSTALLDIR
-    files: [{ source: dist/exporter.exe, key_path: true }]
-    services: [{ name: example-exporter, start: auto, control: { start: install, stop: both, wait: true } }]
-  - { directory: INSTALLDIR, harvest: { from: dist/web, exclude: ["**/*.map"] } }
-ui: install_dir             # none | minimal | install_dir | feature_tree | mondo | advanced
-reproducible: true          # honours SOURCE_DATE_EPOCH
-previous_msi: releases/exporter-1.4.1.msi   # GUID carry-over
-```
-
-Every field MUST map to a documented rule; `wait: true` gives `ServiceControl.Wait = 1`. The frontend MUST reject forbidden combinations, such as a service whose key path is not its executable.
-
-### Milestones
-
-| # | Scope | Done when |
-|---|---|---|
-| M1 | `cfb` reader + deterministic writer | appendix A.2 byte-identical (v3, v4); real packages read; strict checks pass |
-| M2 | `msidb` + `suminfo` | A.5 streams and whole file identical; `inspect` dumps real packages; refcounts verified |
-| M3 | `cab` (stored + MSZIP) | chapter 04 §16 vectors; an independent extractor accepts the output; A.5 cabinet identical |
-| M4 | `pe`, hashing, short names, GUIDs, IDs | A.6 and A.8 vectors; real executables' version and language match toolchain output |
-| M5 | `bind` core | a one-file package installs, uninstalls and major-upgrades on Windows CI |
-| M6 | Entities: registry, environment, shortcuts, services, INI, folders, launch conditions, searches, upgrades, native custom actions (types 19, 35, 51, 34, 50, …) | one Windows CI scenario each |
-| M7 | `validate` | builder-enforced ICE list, runtime invariants and schema checks |
-| M8 | `ui` | each set installs interactively; automated with `/qb`, plus `/qf` screenshots if possible |
-| M9 | `harvest`, reproducible mode, GUID carry-over | two builds byte-identical; carry-over works against a real older package |
-| M10 | `sign` / `verify` | chapter 11 §11 matrix passes; `verify` matches the three real-package results |
-| M11 | `.msm` output (optional) | modularization rules of chapter 10 §8.9 |
-
-### Pitfalls
-
-- **Database:** empty is NULL; refcounts include `_Tables` and `_Columns`; 3-byte IDs past the threshold; rows sort by string IDs (02 §4, §7.4).
-- **Limits:** 16-bit integers −32767…32767; stream names ≤ 31 encoded units; `\u0005…` names stay unencoded (02 §3, §7.5).
-- **Two name orders:** directory siblings sort length first, then upper-cased (01 §9.2); signatures sort byte-wise UTF-16LE (11 §4.2).
-- **Cabinets:** big-endian checksum tail; each MSZIP block is a full DEFLATE stream primed with the previous 32 KiB; file order = `File.Sequence` (04).
-- **Summary:** Page Count ≥ 200 for x64 and ≥ 500 for Arm64, default 500; a new package code per build (03 §6.10).
-- **Components:** stable GUIDs, one key path, no moved files; services key on their executable; per-user shortcuts need HKCU key paths (07 §4, §11).
-- **Other:** the upgrade ActionProperty and UI-changed directories are secure (07 §7); read the fixed file version, not the string table (10 §8.4.3).
-
-### Testing strategy
-
-1. Appendix A vectors in every package's unit tests, plus property-based round trips (65535+ strings, v4 container).
-2. An independent open-source MSI reader and cabinet extractor run over every output; any warning fails CI.
-3. Semantic golden comparisons with reference-toolchain packages, ignoring generated IDs, GUIDs and short names.
-4. Windows CI per scenario: install, repair, uninstall, upgrade, downgrade rules, per-user and dual scope, ICE validation, signing.
-5. Native Go fuzzing of every reader: no panics, bounded memory, cycle detection.
-
-### Windows experiments
-
-- W1: Does a v4 container over 2 GB install, and what makes the engine choose v4? (1 GB and 3 GB packages, `/i` and `/a`)
-- W2: Minimum engine for a 65001 database (Page Count 200/300/500 on engines 4.5 and 5.0).
-- W3: String refcounts above 65535 (a feature with 70,000 components).
-- W4: A multi-language Template (`x64;1033,1031`).
-- W5: The reference toolchain's downgrade-detection rows (`Upgrade`, `LaunchCondition`, `CustomAction`).
-- W6: Signature prefix order, P position and exclusion scope (chapter 11 §11 cases 2–4).
-- W7: Whether `minimal.msi` installs and uninstalls.
-- W8: The engine's per-table column maximum (a 33-column custom table).
-- W9: Stored versus MSZIP cabinets, and a trailing empty final DEFLATE block.
-- W10: `MsiServiceConfigFailureActions` with a restart action on Windows Server 2025, per-machine and elevated: does it still fail with 1939? (section 10.3)
-- W11: A `Property` row moved out of key order, and an unsorted multi-row `Upgrade` table: confirm error 2211 and find which tables the engine checks.
-- W12: A string of 70,000 bytes (license RTF) in both long-entry layouts: the documented one installs, the swapped one fails.
-- W13: An `Arm64` package on Arm64 Windows: Page Count 500, bit 256 on every component, `ProgramFiles64Folder`.
+Each experiment should record binary SHA-256, Windows build, architecture, exact input, command/API, error status, MSI verbose log, serialized output and independent-reader comparison. Negative results must be preserved, not reinterpreted as proof of an unrelated format rule.
 
 ### Security
 
-- Readers bound allocations by file size, detect FAT, MiniFAT, DIFAT and directory cycles, cap tree depth, and check string-pool and table sizes.
-- Extraction normalizes cabinet names and `DefaultDir` paths and refuses `..`, absolute paths and device names. It splits `target:source` and `short|long` first; an extractor that joined raw values wrote names such as `winsxs\…:ulCRTx64` that Windows rejects (reported).
-- File names outside the database code page fail the build with a message naming the file. One builder crashed on a Cyrillic file name with code page 1252 (reported); 65001 or a matching ANSI code page stores it.
-- Harvesting follows no symlinks out of its root unless asked, and reports special files.
-- Private keys never touch temporary files; external signers (PKCS#11, cloud KMS) see only the digest. Reproducible mode never reads the clock.
+All parsers should bound allocations and offsets, detect CFB chain cycles, validate field types and reject unsafe extraction paths. Fuzz fixtures may demonstrate reader defects, but not necessarily a Windows Installer incompatibility.
 
-### Clean-room rules
+### Independence
 
-- Implement only from this specification and Microsoft's public documentation. Do not access `github.com/wixtoolset`, WiX source, or other MSI, compound-file or cabinet code.
-- Black-box tests with independent tools are fine. Other toolchains' packages may be compared, but never copy their UI layouts, texts, bitmaps or binaries.
-- For an Unverified point, implement the stated default and add its Windows experiment.
+This document prescribes no language, build system, CLI, encoder, XML dialect or custom-action policy. Implementation recipes and example project architectures belong outside the shared format specification.
 
 ## 15. Test vectors and verification
 
@@ -1338,111 +1265,42 @@ Inputs are exact strings; ␟ is U+001F and hex is upper case.
 
 - That `minimal.msi` installs into `C:\Program Files (x86)\Demo` on Windows and uninstalls (W7). A missing `_Validation` should not block it.
 
-## 16. Field reports from msitools
+## 16. Independent implementation comparison
 
-msitools (`wixl`, `msibuild`, `msiextract`, `msiinfo`) is the other open-source
-toolchain that writes MSI packages on Linux, and its bug tracker records how
-packages fail on real Windows machines. This section goes through its 99 issues
-and the related merge requests up to 2026-10-25 and turns each relevant one
-into a rule for the tool.
+GNOME msitools and WiX are comparative implementations, not authorities for all Windows Installer semantics. The following observations are grounded in their public repositories and should be version-pinned before being promoted to a format assertion.
 
-**Provenance.** Only issue texts, merge-request descriptions, commit subjects
-and Windows Installer logs quoted in them were used, as black-box evidence. No
-msitools, libgsf or libgcab source code was read. Merge-request statements that
-cite WiX source files (for example how WiX derives a default File key or
-numbers `ControlEvent` rows) were left out. Facts taken from here carry
-**(reported)** elsewhere in this document.
+| Source | Observed implementation detail | Interpretation |
+| --- | --- | --- |
+| [msitools libmsi-database.c](https://github.com/GNOME/msitools/blob/master/libmsi/libmsi-database.c) | MSI, transform and patch CLSID variants are defined; database storage uses table, string and binary streams | Corroborates the on-disk data model |
+| [msitools string.c](https://github.com/GNOME/msitools/blob/master/libmsi/string.c) | Parses long string-pool entries with zero-length marker, refcount and 32-bit length | Useful differential parser for long-string fixtures |
+| [msitools table.c](https://github.com/GNOME/msitools/blob/master/libmsi/table.c) | Implements integer bias and sorted stored primary keys | Useful differential writer for table ordering |
+| [WiX MsiInterop.cs](https://github.com/wixtoolset/wix/blob/main/src/wix/WixToolset.Core.Native/Msi/MsiInterop.cs) | Native MsiDatabaseImportW and MsiDatabaseCommit bindings | Some resulting database serialization is performed by native Windows APIs |
+| [WiX Core.WindowsInstaller](https://github.com/wixtoolset/wix/tree/main/src/wix/WixToolset.Core.WindowsInstaller) | Bind, Unbind, Decompile and Validate paths | Authoring defaults must be distinguished from on-disk requirements |
 
-### 16.1 Bugs and the rules they give
+### Interoperability reports
 
-| msitools report | What went wrong | Rule for the tool | Section |
-|---|---|---|---|
-| [#99](https://gitlab.gnome.org/GNOME/msitools/-/issues/99), [!97](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/97) | An inserted `Property` row was stored out of key order; Windows logged error 2211 on `Property`, found no `ProductCode` and failed with 1605 | Sort every table by stored key values on every write; re-sort after editing | 3 |
-| [#60](https://gitlab.gnome.org/GNOME/msitools/-/issues/60), [#53](https://gitlab.gnome.org/GNOME/msitools/-/issues/53) | A writer stored long string-pool entries with swapped words; packages with a license text above 64 KiB did not load ("string table load failed") | Long entry = `0, refcount, low, high`; test with a 70,000-byte string | 3 |
-| [#10](https://gitlab.gnome.org/GNOME/msitools/-/issues/10), [#31](https://gitlab.gnome.org/GNOME/msitools/-/issues/31), [#32](https://gitlab.gnome.org/GNOME/msitools/-/issues/32), [!66](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/66) | String-pool words byte-swapped as 32-bit values on big-endian hosts | Decode every field with its exact width through `encoding/binary`; run the vectors on a big-endian target (`GOARCH=s390x` under QEMU) | 3, 15 |
-| fc2daea (commit) | A CFB library failed to open 0-byte streams in the mini stream, so an empty database could not be reopened | Readers accept size 0 with any start sector; writers use ENDOFCHAIN | 2 |
-| [!82](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/82) | Embedded cabinets of Windows 11 SDK packages were skipped when streams were opened by index | Open streams by decoded name from a full directory walk | 2 |
-| [#33](https://gitlab.gnome.org/GNOME/msitools/-/issues/33)–[#36](https://gitlab.gnome.org/GNOME/msitools/-/issues/36) | Crafted files crashed a reader: FAT entries 0x30303030, huge directory indexes, a VT_LPSTR length of 0xFFFFFFFF, a string where a FILETIME belongs | Bounds and type checks before every copy; add these four shapes to the fuzz seed corpus | 2, 4, 14 |
-| [#57](https://gitlab.gnome.org/GNOME/msitools/-/issues/57) | Summary times printed one hour off across daylight saving | FILETIME is UTC; text forms say so | 4 |
-| [#4](https://gitlab.gnome.org/GNOME/msitools/-/issues/4), [#6](https://gitlab.gnome.org/GNOME/msitools/-/issues/6) | An extractor regression corrupted bytes in most files and stopped with "Invalid cabinet chunk" on a real package | Multi-block MSZIP round-trip tests with cross-block matches; compare extracted files byte for byte | 5 |
-| [#68](https://gitlab.gnome.org/GNOME/msitools/-/issues/68) | A retail package with external LZX cabinet sets (`EURO.cab` → `EURO1.cab`) failed with "Invalid folder index" | Readers handle continued folders or fail clearly; writers never span | 5 |
-| [#5](https://gitlab.gnome.org/GNOME/msitools/-/issues/5), [#68](https://gitlab.gnome.org/GNOME/msitools/-/issues/68) | Extracted paths contained raw `DefaultDir` values such as `name:ulCRTx64` and `ft--8ci7\|ulpCRTx64` | Split `target:source` and `short\|long` before building paths | 6.4, 14 |
-| [#74](https://gitlab.gnome.org/GNOME/msitools/-/issues/74) | A file named `1986ве1т.cfg` crashed the build under code page 1252 | Check every string against the code page and name the offending row | 3, 14 |
-| [#37](https://gitlab.gnome.org/GNOME/msitools/-/issues/37), [#45](https://gitlab.gnome.org/GNOME/msitools/-/issues/45), [!86](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/86) | Before/after scheduling put REP between InstallServices and StartServices (error 2613) and a deferred action before InstallInitialize | Keep each chain next to its anchor (11.7); check REP windows and ICE77 after numbering | 9.2, 11.7 |
-| [#63](https://gitlab.gnome.org/GNOME/msitools/-/issues/63), [!56](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/56), [!108](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/108) | Dialogs failed with error 2834 (tab ring); PathEdit and SelectionTree were not reachable; UIText rows were missing | One closed ring of all non-static controls; every used UIText key present | 7.2 |
-| [!54](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/54), [!108](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/108) | UI sequences named dialogs that were not in the package; a dialog reached only by `SpawnDialog` was left out | Include exactly the dialogs reachable from sequences and events (ICE27, ICE44) | 7.5 |
-| [#42](https://gitlab.gnome.org/GNOME/msitools/-/issues/42), [#65](https://gitlab.gnome.org/GNOME/msitools/-/issues/65), [!89](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/89) | Executables got no `File.Version`, so upgrades kept the old binary | Read the PE version resource; no `MsiFileHash` row for versioned files | 8.6, 11.5 |
-| [#61](https://gitlab.gnome.org/GNOME/msitools/-/issues/61), [!93](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/93) | Arm64 packages without bit 256 installed into 32-bit views; an Arm64 build reportedly failed to open, unresolved | Arm64 is 64-bit for component and search bits; Windows experiment W13 | 8.2 |
-| [#46](https://gitlab.gnome.org/GNOME/msitools/-/issues/46), [#78](https://gitlab.gnome.org/GNOME/msitools/-/issues/78), [#79](https://gitlab.gnome.org/GNOME/msitools/-/issues/79), [#94](https://gitlab.gnome.org/GNOME/msitools/-/issues/94), [#95](https://gitlab.gnome.org/GNOME/msitools/-/issues/95), [!110](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/110) | Users could not tell which architecture spelling to use, or what to pass for a neutral package; command line and source could disagree | One architecture setting, case-insensitive, mapped to the exact Template token; `Intel` for neutral packages | 4, 14 |
-| [#87](https://gitlab.gnome.org/GNOME/msitools/-/issues/87), [#93](https://gitlab.gnome.org/GNOME/msitools/-/issues/93) | `ProgramFiles6432Folder`, a WiX v4 alias, was used with a v3-style toolchain | Resolve aliases at build time | 8.2 |
-| [#93](https://gitlab.gnome.org/GNOME/msitools/-/issues/93) | Files without an explicit key produced no File rows and empty key paths; the build exited 0 | Fail on any component whose key path is missing; never exit 0 with an invalid package | 11.2 |
-| [#75](https://gitlab.gnome.org/GNOME/msitools/-/issues/75), [#96](https://gitlab.gnome.org/GNOME/msitools/-/issues/96), [!90](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/90) | A trailing `/` made the harvester emit empty directory names; random package codes, harvest IDs and times made rebuilds differ | Normalized harvest paths; reproducible mode (11.1) | 11.1, 11.2 |
-| [#70](https://gitlab.gnome.org/GNOME/msitools/-/issues/70) | A verb without arguments produced a command ending in `(null)` | Omit missing arguments | 10.2 |
-| [#9](https://gitlab.gnome.org/GNOME/msitools/-/issues/9), [#39](https://gitlab.gnome.org/GNOME/msitools/-/issues/39), [#98](https://gitlab.gnome.org/GNOME/msitools/-/issues/98) | Environment support was missing, then shipped with `Permanent` inverted, so non-permanent variables stayed after uninstall | `-` means remove on uninstall and is added unless permanent; test both polarities on Windows | 11.9 |
-| [#40](https://gitlab.gnome.org/GNOME/msitools/-/issues/40), [!96](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/96), [!94](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/94) | Secure properties were not listed, so command-line values were lost in managed (Intune, GPO) and elevated installs; hidden properties were logged in clear text | Fill `SecureCustomProperties` and `MsiHiddenProperties` from the model; warn on non-public secure names | 8.7, 10.1 |
-| [!95](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/95) | Every file was vital and `ServiceInstall` could not be | File bit 0x200 by default and clearable; `ErrorControl` +0x8000 on request | 10.2 |
-| [#11](https://gitlab.gnome.org/GNOME/msitools/-/issues/11), [#43](https://gitlab.gnome.org/GNOME/msitools/-/issues/43), [!92](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/92), [!98](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/98) | Service settings and recovery actions were not expressible; the native failure-actions table failed with 1939 | `MsiServiceConfig` for settings; `sc.exe` for recovery (16.2) | 10.3 |
-| [#24](https://gitlab.gnome.org/GNOME/msitools/-/issues/24), [!107](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/107) | No way to add a firewall rule | `netsh` recipe (16.2) | 10.3 |
-| [!106](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/106) | Event-log sources aborted the build | Plain `Registry` rows | 10.3 |
-| [#7](https://gitlab.gnome.org/GNOME/msitools/-/issues/7), [#93](https://gitlab.gnome.org/GNOME/msitools/-/issues/93), [!91](https://gitlab.gnome.org/GNOME/msitools/-/merge_requests/91), [#27](https://gitlab.gnome.org/GNOME/msitools/-/issues/27) | A feature without a level crashed the build; unknown or misspelled input was ignored, crashed the build, or failed without saying where; foreign-namespace attributes overrode core ones | Apply documented defaults (feature level 1); unknown keys are errors with a file and line; enum values are case-insensitive | 10.2, 14 |
+Historical [GNOME msitools reports](https://gitlab.gnome.org/GNOME/msitools/-/issues) provide candidate tests for out-of-order table rows (#99), long-string encoding (#60), CAB continuation (#68), malformed FAT entries (#33) and UI control cycles (#63). These are **reported** cases until minimized fixtures are validated with native Windows Installer APIs and runtime.
 
-Not carried over: build, packaging and documentation issues ([#8](https://gitlab.gnome.org/GNOME/msitools/-/issues/8), [#13](https://gitlab.gnome.org/GNOME/msitools/-/issues/13)–[#21](https://gitlab.gnome.org/GNOME/msitools/-/issues/21), [#23](https://gitlab.gnome.org/GNOME/msitools/-/issues/23), [#38](https://gitlab.gnome.org/GNOME/msitools/-/issues/38), [#41](https://gitlab.gnome.org/GNOME/msitools/-/issues/41), [#44](https://gitlab.gnome.org/GNOME/msitools/-/issues/44), [#48](https://gitlab.gnome.org/GNOME/msitools/-/issues/48), [#52](https://gitlab.gnome.org/GNOME/msitools/-/issues/52), [#55](https://gitlab.gnome.org/GNOME/msitools/-/issues/55), [#56](https://gitlab.gnome.org/GNOME/msitools/-/issues/56), [#58](https://gitlab.gnome.org/GNOME/msitools/-/issues/58), [#59](https://gitlab.gnome.org/GNOME/msitools/-/issues/59), [#67](https://gitlab.gnome.org/GNOME/msitools/-/issues/67), [#71](https://gitlab.gnome.org/GNOME/msitools/-/issues/71)–[#73](https://gitlab.gnome.org/GNOME/msitools/-/issues/73), [#80](https://gitlab.gnome.org/GNOME/msitools/-/issues/80)–[#84](https://gitlab.gnome.org/GNOME/msitools/-/issues/84), [#88](https://gitlab.gnome.org/GNOME/msitools/-/issues/88)–[#92](https://gitlab.gnome.org/GNOME/msitools/-/issues/92)), feature requests for WiX elements the tool covers through its own model ([#12](https://gitlab.gnome.org/GNOME/msitools/-/issues/12), [#14](https://gitlab.gnome.org/GNOME/msitools/-/issues/14), [#22](https://gitlab.gnome.org/GNOME/msitools/-/issues/22), [#25](https://gitlab.gnome.org/GNOME/msitools/-/issues/25), [#26](https://gitlab.gnome.org/GNOME/msitools/-/issues/26), [#47](https://gitlab.gnome.org/GNOME/msitools/-/issues/47), [#50](https://gitlab.gnome.org/GNOME/msitools/-/issues/50), [#51](https://gitlab.gnome.org/GNOME/msitools/-/issues/51), [#66](https://gitlab.gnome.org/GNOME/msitools/-/issues/66), [#69](https://gitlab.gnome.org/GNOME/msitools/-/issues/69), [#85](https://gitlab.gnome.org/GNOME/msitools/-/issues/85)), the WiX UI requests ([#1](https://gitlab.gnome.org/GNOME/msitools/-/issues/1)–[#3](https://gitlab.gnome.org/GNOME/msitools/-/issues/3), [#28](https://gitlab.gnome.org/GNOME/msitools/-/issues/28), [#49](https://gitlab.gnome.org/GNOME/msitools/-/issues/49), [#62](https://gitlab.gnome.org/GNOME/msitools/-/issues/62)), SQL and command-line bugs of msitools' own tools ([#29](https://gitlab.gnome.org/GNOME/msitools/-/issues/29), [#30](https://gitlab.gnome.org/GNOME/msitools/-/issues/30), [#54](https://gitlab.gnome.org/GNOME/msitools/-/issues/54), [#64](https://gitlab.gnome.org/GNOME/msitools/-/issues/64)), [#77](https://gitlab.gnome.org/GNOME/msitools/-/issues/77) (MSIX) and [#97](https://gitlab.gnome.org/GNOME/msitools/-/issues/97) (WiX fragment parsing).
+### Native binary sample inspection
 
-### 16.2 Native recipes for service recovery and firewall rules
+The supplied x64 samples were inspected statically. msi.dll exports MsiOpenDatabaseW, MsiDatabaseOpenViewW, MsiViewExecute, MsiDatabaseCommit and MsiGetFileHashW. cabinet.dll exports FCICreate, FCIAddFile, FDICreate, FDICopy and FDIIsCabinet. These names establish API availability, not an internal algorithm or a runtime test result.
 
-Both use EXE custom actions that ship with Windows, so they keep the "no custom-action DLLs" rule. Both were checked by installing and uninstalling on Windows Server 2025 (reported).
-
-**Service recovery actions.**
-
-1. A type-51 action, scheduled once, sets a property to `[SystemFolder]sc.exe`.
-2. A type-50 action, deferred and no-impersonate (50 + 1024 + 2048 = 3122), uses that property as `Source`. Its `Target` is `failure "<service>" reset= <seconds> actions= restart/<ms>/restart/<ms>/…`.
-3. Schedule it after InstallServices (else after InstallFiles, else after InstallInitialize), with condition `$<Component> > 2`: installed locally or run from source.
-
-- Give a delay only to `restart` actions. Leave out trailing `none` actions, and reject a `none` between two other actions, which `sc.exe` cannot express.
-- Quote arguments the way the C runtime parses them: double the backslashes before a quote and at the end of a value. `Target` is limited to 255 characters, so warn when the formatted line may exceed it.
-- A failing `sc.exe` fails the install. Rollback does not restore the previous recovery actions; record this as a known gap.
-
-**Firewall rules.**
-
-- Run `netsh advfirewall firewall …` from `[System64Folder]` in 64-bit packages and `[SystemFolder]` otherwise, as deferred, no-impersonate EXE actions.
-- On install and repair, delete every rule by name and direction first, then add each rule; a rollback action deletes what was added. Delete all rules before adding any, so a TCP and a UDP rule with one name survive.
-- On removal, delete by name and direction only, because a port or address taken from a property may differ at maintenance time; a rollback action adds the rule back. Deleting never fails the install (Continue, 64).
-- Rules name a program (`program="[#File]"`) or a port and protocol (TCP by default), with remote addresses or a scope and a profile (all by default).
-- Unverified: removing only the feature (`REMOVE=<Feature>`) when the port came from a property.
-
-### 16.3 "This installation package could not be opened" (1620)
-
-Several reports ([#61](https://gitlab.gnome.org/GNOME/msitools/-/issues/61), [#76](https://gitlab.gnome.org/GNOME/msitools/-/issues/76), [#86](https://gitlab.gnome.org/GNOME/msitools/-/issues/86)) end with this message, a verbose log line `Note: 1: 2203 2: <path> 3: -2147287039` and `MainEngineThread is returning 1620`. The engine then failed to open the compound file at all, before reading any table. In [#76](https://gitlab.gnome.org/GNOME/msitools/-/issues/76) the package was fine; the cause was the test machine, and a Windows CI job SHOULD rule out these first:
-
-1. The file was damaged in transfer: compare its SHA-256 with the build output.
-2. It is on a network share, or `msiexec` got a relative path: copy it locally and pass an absolute path.
-3. It carries the downloaded-file mark: run `Unblock-File`.
-4. Security software rewrote or locked it.
-
-A policy block gives a different message ("The system administrator has set policies to prevent this installation"). Only when all four are ruled out is the container suspect; then `inspect` and an independent reader (section 15) SHOULD find the fault. [#86](https://gitlab.gnome.org/GNOME/msitools/-/issues/86) came from a third toolchain and [#61](https://gitlab.gnome.org/GNOME/msitools/-/issues/61) was never resolved.
-
-## 17. Full specification
-
-This document is a summary. The full specification is not part of this
-repository; its chapters are:
-
-| Chapter | Content |
+| Sample | SHA-256 |
 | --- | --- |
-| 01 Compound file | CFB v3/v4 container: header, FAT, DIFAT, MiniFAT, directory, red-black tree, deterministic writer, reader |
-| 02 MSI database storage | Stream-name encoding, string pool, column types, catalog, table streams, binary streams, sub-storages, canonical writer, transforms (informative) |
-| 03 Summary information | The property-set stream and every summary property for packages, transforms, patches and modules |
-| 04 Cabinets | CAB format, checksum, MSZIP with Go's standard DEFLATE package, MSI usage, determinism |
-| 05 Database schema | Every non-UI standard table (97), column data types, `_Validation`, per-column value syntaxes; machine-readable as `schema/tables.json` |
-| 06 User interface | UI tables, dialogs, controls, events, UI flow, a minimal valid UI design; machine-readable as `schema/ui-tables.json` |
-| 07 Installer runtime | Identity codes, contexts, directories, components, features, file versioning, properties, condition and formatted-text grammars, upgrades, transactions, builder checklist |
-| 08 Actions and sequences | All standard actions, suggested sequences, table-to-action mapping, custom-action types, scheduling, ICE reference |
-| 09 WiX v3 authoring model | WiX concepts and the rows each produces (a behaviour reference, not a parser specification) |
-| 10 WiX v3 build semantics | How WiX derives every value at build time, and the tool's own algorithms where WiX's are internal |
-| 11 Digital signatures | Authenticode for MSI: streams, digest, pre-hash, PKCS#7, verification |
-| 12 Implementation guide | Go architecture, configuration sketch, milestones, pitfalls, testing, Windows experiments, security, clean-room rules |
-| 13 WiX v4 and later | What changed in generated output and defaults in WiX v4 to v7, and the tool's default policy (R1 to R26) |
-| Appendix A | Test vectors, including a complete minimal package with machine-readable inputs |
+| msi.dll | `9dc1f04c61d910baa8e7ec18421359249a27ab9894d96f8f1c8d7ee771b6625c` |
+| msiexec.exe | `6c63cfd4cb36998e9ff763117d4a74193ba72a5fc7f51ea7210f9065c2188452` |
+| cabinet.dll | `9e5e94280b3f6f4249ce4f1e78625372a66f01fefa3d2132a180f84c5c4ba7ff` |
 
-Suggested reading order for an implementer: 12 (plan), 01, 02, 03, 04 and
-appendix A (milestones M1 to M3); then 05, 06, 07, 08, 10, 09 and 13
-(milestones M4 to M9); then 11 (M10).
+## 17. Reference chapters
+
+The detailed chapters and schema files referred to above are not contained in this repository. Their contents and hash vectors are therefore reference claims until the complete source inputs and validation artifacts are published.
+
+| Chapter | Subject |
+| --- | --- |
+| 01–04 | CFB, database storage, summary properties and cabinets |
+| 05–06 | Standard database tables, UI tables and dialogs |
+| 07–08 | Native installer runtime, actions and sequencing |
+| 09–10, 13 | WiX-specific authoring and generated-output behavior |
+| 11 | MSI Authenticode signing |
+| 12 | Conformance fixtures and implementation comparison |
+| Appendix A | Reproducible test vectors |
