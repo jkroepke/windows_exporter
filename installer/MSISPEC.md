@@ -309,7 +309,7 @@ Each `ab` is `43 4B` ("CK") plus a raw RFC 1951 stream. Its last block has BFINA
 4. Prefix "CK" and emit the CFDATA.
 
 - Use a fresh writer per block, because `Reset` re-applies the original dictionary. Blocks may be compressed in parallel with identical output.
-- Levels 0 and −2 ignore the dictionary, which is legal. Go 1.27.3 ends each stream with an empty fixed-Huffman final block, which is valid.
+- Levels 0 and −2 ignore the dictionary, which is legal. A tested Go 1.27.3 encoder ends each stream with an empty fixed-Huffman final block, which is valid.
 - Decode with `flate.NewReaderDict(ab[2:], last 32768 bytes of history)` and `io.ReadFull` of `cbUncomp` bytes. <!-- codespell:ignore flate -->
 - A wrong history shows up as scattered wrong bytes in otherwise plausible files, or as "invalid chunk" errors in later blocks; an extractor regression did both on a real package (reported). Test decoding on a folder of more than two blocks with matches that reach back across block boundaries, and compare every extracted file with its source.
 
@@ -340,7 +340,7 @@ Unverified:
 
 ## 6. Database schema
 
-A builder creates each table from the standard schema and checks every value against it, as ICE validation would. Full detail: chapter 05.
+An MSI producer creates each table from the standard schema and checks every value against it, as ICE validation would. Full detail: chapter 05.
 
 ### 6.1 Column types (`.idt` archive notation)
 
@@ -375,14 +375,14 @@ Other groups (COM, ODBC, security, signatures, patching, merge modules) are in c
 
 ### 6.3 `_Validation` and the schema files
 
-Validators (ICE03, ICE06, ICE32) read `_Validation`, the installer does not, and a builder SHOULD write it. Its key is `Table s32` + `Column s32`. The other columns are `Nullable s4`, `MinValue I4`, `MaxValue I4`, `KeyTable S255`, `KeyColumn I2`, `Category S32`, `Set S255` and `Description S255`.
+Validators (ICE03, ICE06, ICE32) read `_Validation`, the installer does not, and a complete database SHOULD include it. Its key is `Table s32` + `Column s32`. The other columns are `Nullable s4`, `MinValue I4`, `MaxValue I4`, `KeyTable S255`, `KeyColumn I2`, `Category S32`, `Set S255` and `Description S255`.
 
 - Write one row per column of every table present, including its own ten, and none for absent columns (ICE06). Toolchain packages add two rows for the pseudo-table `_SummaryInformation` (observed).
 - `Nullable` is `Y` or `N`; `KeyTable` may name several tables, separated by `;`. `KeyColumn` is 1-based (1..32). `Category` is null for integers and `Binary` for streams.
 - The Set of `_Validation.Category` MUST be the toolchain's 26 names. They include `DefaultDir`, `FormattedSDDLText`, `Integer`, `DoubleInteger` and `TimeDate`; Microsoft's 23-name list has `KeyFormatted` and `URL` instead.
 - `schema/tables.json` (`formatVersion` 1) holds the 97 non-UI tables and their 445 columns; `schema/ui-tables.json` holds the 14 UI tables in the same format.
 - Each column lists `name`, `type`, `primaryKey`, `description` and its exact `_Validation` values (`category`, `minValue`, `maxValue`, `keyTable`, `keyColumn`, `set`). `"verified"` and `"unverified"` flags mark confidence.
-- System tables (`_Tables`, `_Columns`, `_Streams`, `_Storages`) are in neither file, and a builder MUST NOT create them.
+- System tables (`_Tables`, `_Columns`, `_Streams`, `_Storages`) are in neither file, and they are synthesized by the database storage layer.
 
 ### 6.4 Value syntaxes that trip builders up
 
@@ -516,7 +516,7 @@ Static package validation and Windows runtime tests verify different properties.
 - Per-user packages MUST pass ICE105: no no-impersonate deferred actions, `SystemFolder`-type Directory keys, GAC assemblies, ODBCDataSource, ServiceInstall or HKLM rows.
 - Platform `x64` or `Intel64` needs Page Count ≥ 200, `Arm64` ≥ 500. Component bit 256 does not move files: on 64-bit Windows `ProgramFilesFolder` is `C:\Program Files (x86)\`, so use `ProgramFiles64Folder` explicitly (ICE80).
 - `Arm64` packages need bit 256 like `x64`: without it their files and registry values land in the 32-bit views (reported). An `x64` package also installs on Arm64 Windows, which runs x64 code under emulation (reported).
-- `ProgramFiles6432Folder` is a WiX v4 alias, not a Windows Installer property. A builder resolves such aliases to `ProgramFilesFolder` or `ProgramFiles64Folder` from the platform and never emits them as Directory keys; otherwise the folder is created literally under `TARGETDIR`.
+- `ProgramFiles6432Folder` is a WiX v4 alias, not a Windows Installer property. A WiX-aware producer resolves such aliases to `ProgramFilesFolder` or `ProgramFiles64Folder` from the platform and never emits them as Directory keys; otherwise the folder is created literally under `TARGETDIR`.
 
 ### 8.3 Directory resolution (CostFinalize)
 
@@ -550,7 +550,7 @@ The component code is machine-wide: one GUID is one component in every package. 
 2. Both versioned: the higher version wins. At equal versions the product language is favoured, and a language superset is kept.
 3. Both unversioned: skip if `MsiFileHash` matches. Keep B if it was modified after creation; otherwise install A.
 
-- The key file is decided first. The installer trusts the authored `File.Version` and `File.Language`, so copy them from the version resource. A builder that leaves `Version` empty for an executable makes it unversioned, and an upgrade then keeps the old binary with "Disallowing installation of component … since the same component with higher versioned keyfile exists" (reported).
+- The key file is decided first. The installer trusts the authored `File.Version` and `File.Language`, so copy them from the version resource. An MSI that leaves `Version` empty for an executable makes it unversioned, and an upgrade then keeps the old binary with "Disallowing installation of component … since the same component with higher versioned keyfile exists" (reported).
 - Unversioned files get no version; fonts get a null Language. A companion file (Version = another File key) follows its parent and is never a key path.
 - `REINSTALLMODE` (default `omus`): `p` missing, `o` older, `e` equal or older, `d` different, `a` all, `c` checksum. Then `u` user registry, `m` machine registry, `s` shortcuts, `v` re-cache the package.
 
@@ -635,7 +635,7 @@ Prefer A or B. Minor upgrades install with `msiexec /i new.msi REINSTALL=ALL REI
 
 ## 9. Actions and sequences
 
-The installer runs actions in ascending sequence order; a builder emits the actions its tables need and places custom actions relative to them.
+The installer runs actions in ascending sequence order; package sequences contain actions required by their tables and places custom actions relative to them.
 
 ### 9.1 Sequence tables
 
@@ -653,7 +653,7 @@ Install, administrative and advertise modes each have an execute table (IES, AES
 
 ### 9.2 Default sequence numbers
 
-Numbers are Microsoft's suggested ones; where the reference toolchain differs, the builder follows WiX (chapter 08 §6). "Always" marks actions every package gets (chapter 08 §6.4, observed in every WiX package).
+Numbers are Microsoft's suggested ones; where the reference toolchain differs, the WiX reference producer uses its own defaults (chapter 08 §6). "Always" marks actions every package gets (chapter 08 §6.4, observed in every WiX package).
 
 | Actions | IES | IUS | Note |
 |---|---|---|---|
@@ -675,7 +675,7 @@ Numbers are Microsoft's suggested ones; where the reference toolchain differs, t
 
 - Admin tables, always: AUS has the costing actions and ExecuteAction 1300. AES has costing, InstallValidate 1400, InstallInitialize 1500, InstallAdminPackage 3900, InstallFiles 4000 and InstallFinalize 6600.
 - AdvtES, always: CostInitialize 800, CostFinalize 1000, InstallValidate 1400, InstallInitialize 1500, PublishFeatures 6300, PublishProduct 6400 (ICE96), InstallFinalize 6600. Its tables may add CreateShortcuts 4500, Register…Info 4600–4900, PublishComponents 6200 and MsiPublishAssemblies 6250; nothing else is allowed.
-- Builder defaults where Microsoft gives no number: IsolateComponents 950, ResolveSource 1050, MsiConfigureServices 5850, ForceReboot 6450, InstallExecute 6500, ScheduleReboot 6610. Other numbers: chapter 08 §3.
+- Suggested sequence numbers where Microsoft gives no number (non-normative): IsolateComponents 950, ResolveSource 1050, MsiConfigureServices 5850, ForceReboot 6450, InstallExecute 6500, ScheduleReboot 6610. Other numbers: chapter 08 §3.
 - RemoveExistingProducts (REP) follows FindRelatedProducts in one of four windows (ICE63). Window 1: between InstallValidate and InstallInitialize (WiX 1401). Window 2: right after InstallInitialize, before any script action (WiX 1501).
 - Window 3: right after InstallExecute(Again) (6550). Window 4: after InstallFinalize (WiX 6601, tutorial 6700).
 - Window 1 removes the old product first and copies reused files again. If removal fails, window 3 rolls back both products and window 4 only the removal.
@@ -736,7 +736,7 @@ Only these 20 base types are valid (ICE68); sums such as 3, 33, 49 and 55 are no
 | TSAware | `0x4000` 16384 | Impersonate on Terminal Server per-machine installs; deferred only |
 | PatchUninstall | `ExtendedType` `0x8000` 32768 | Runs only when a patch is removed (Windows Installer 4.5+) |
 
-Builder checks (MUST; chapter 08 §5.5, §5.10):
+Reference validation checks (profile-specific; chapter 08 §5.5, §5.10):
 
 - `Type & 0x8008` is 0. Async is not allowed for script, nested-install or rollback actions.
 - InScript is not allowed for types 7, 19, 23, 35, 39 and 51. NoImpersonate and TSAware need InScript. Type 19 takes no options; 35 and 51 take only `0x300` and HideTarget.
@@ -746,7 +746,7 @@ Builder checks (MUST; chapter 08 §5.5, §5.10):
 - A deferred action `X` reads `CustomActionData` from a property `X`, usually set by a type-51 action before it. Common sums: deferred 1024, rollback 1280, commit 1536, elevated deferred 3072.
 - DLL return codes: 0 success, 1602 user exit, 1603 failure, 259 skip the rest. Any EXE exit code but 0 fails unless Continue is set.
 
-### 9.5 ICE rules the builder enforces
+### 9.5 ICE and consistency validation rules
 
 - **Data:** every column matches `_Validation` (ICE03, 06, 32). `Property` holds `ProductCode` (braced upper-case GUID), `ProductVersion`, `ProductLanguage`, `ProductName` (≤ 63 chars) and `Manufacturer` (ICE05, 16, 24).
 - **Components:** the key-path row belongs to its component (ICE02); `ComponentId` values are unique (ICE08); every component is in a feature (ICE21). A directory key path without files gets a `CreateFolder` row automatically (ICE18).
@@ -754,20 +754,20 @@ Builder checks (MUST; chapter 08 §5.5, §5.10):
 - **Sequences:** known names, order and sections (ICE27); ForceReboot group (ICE28); dialogs only in UI tables (ICE13); the ICE82 group of four; publishing actions in AdvtES (ICE96).
 - **Custom actions:** valid types (ICE68) and placement (ICE12, 72, 75, 77).
 - **Upgrades:** `Upgrade.ActionProperty` is upper case, unique, not in `Property` and listed in `SecureCustomProperties`; a package never removes itself (ICE61). REP windows (ICE63).
-- **Platform:** 64-bit components or script actions need an `x64`, `Arm64` or `Intel64` template. The builder requires PID 14 ≥ 200 for x64 and Intel64 and ≥ 500 for Arm64; ICE80 itself accepts 150 for Intel64.
+- **Platform:** 64-bit components or script actions need an `x64`, `Arm64` or `Intel64` template. The reference profile uses PID 14 ≥ 200 for x64 and Intel64 and ≥ 500 for Arm64; ICE80 itself accepts 150 for Intel64.
 - **Properties:** `Property` defines none of the 11 command-line properties such as `ADDLOCAL`, `REMOVE`, `REINSTALL` (ICE87).
 - **SHOULD:** one filename per directory across components (ICE30); HKCU key paths for per-user components and non-advertised shortcuts (ICE38, 43); no `Directory` key equal to a reserved property (ICE99). UI ICEs: chapter 06; full list: chapter 08 §7.
 
 **Unverified (chapter 08):**
 
 - Run order of equal numbers; whether termination actions in execute tables run; a name that is both a custom action and a dialog.
-- ICE26's action lists are unpublished, so the minimal sets are derived. Builder-default numbers are design choices.
+- ICE26's action lists are unpublished, so the minimal sets are derived. Unspecified sequence numbers are implementation choices.
 - Rollback behaviour of REP windows 1 and 2; which action evaluates `MsiFileHash` and which caches `Icon` entries.
 - Effect of DLL return codes other than 0, 1602 and 1603; values of `ERROR_INSTALL_REBOOT(_NOW)`; HideTarget on every base type.
 
 ## 10. WiX v3 authoring model
 
-Each WiX concept produces a fixed set of rows; the tool offers the same concepts through its own API and never parses WiX XML.
+Each WiX concept produces a fixed set of rows; these are WiX authoring concepts rather than Windows Installer file-format requirements.
 
 "Observed v3" and "observed v5" mean confirmed on real packages built by WiX 3.11 and WiX 5.0.2.
 
@@ -824,7 +824,7 @@ Full detail: chapter 09 §9.2–§9.19.
 - IUS (observed): exit −1, user exit −2, fatal −3, prepare 49, maintenance welcome 1296, resume 1297, welcome 1298, progress 1299. AUS also gets −1/−2/−3.
 - Conditions: 1296 `Installed AND NOT RESUME AND NOT Preselected AND NOT PATCH`; 1297 `Installed AND (RESUME OR Preselected)`; 1298 `NOT Installed OR PATCH`.
 - Properties: `ErrorDialog`, `DefaultUIFont`, `WixUIRMOption=UseRM` (observed), `ARPNOMODIFY=1` without feature selection (observed). The editable folder property (WiX: `WIXUI_INSTALLDIR`) names a public directory key.
-- No DLLs: path checks use `SetTargetPath` then `CheckTargetPath`; printing uses `MsiPrint`. Layouts and texts are the tool's own; keys reuse WiX names (`WelcomeDlg`, `InstallDirDlg`, `Next`, `Back`).
+- No DLLs: path checks use `SetTargetPath` then `CheckTargetPath`; printing uses `MsiPrint`. Dialog layout and text are package-specific; keys reuse WiX names (`WelcomeDlg`, `InstallDirDlg`, `Next`, `Back`).
 - WiX utility features done natively: event-log sources as `Registry` rows, `.url` files as `IniFile` rows, SDDL via `MsiLockPermissionsEx`, service settings via `MsiServiceConfig`. WiX's type-65 environment-broadcast action (observed) is not needed.
 - `MsiServiceConfig` works for delayed auto start (ConfigType 3) and the failure-actions flag (4), with `MsiConfigureServices` at 5850, condition `VersionNT>=600` (reported, Windows Server 2025). `MsiServiceConfigFailureActions` with a restart action failed there with error 1939 (Win32 error 5) and rolled back (reported). Until a Windows experiment shows otherwise, failure actions use a deferred, no-impersonate EXE action running `[SystemFolder]sc.exe failure …` (section 16).
 - Event-log source: under `HKLM\SYSTEM\CurrentControlSet\Services\EventLog\<Log>\<Source>`, write `EventMessageFile`, optional `CategoryMessageFile` with `CategoryCount` and `ParameterMessageFile` (expandable strings, count `#n`), and `TypesSupported` (`#n`). `Security` is not a valid log.
@@ -834,25 +834,25 @@ Full detail: chapter 09 §9.2–§9.19.
 - Primary feature when none is marked; child kinds in automatic key-path selection; file key for non-identifier names.
 - Default code page without localization; x86 `InstallerVersion` default; `Arm`/`Arm64` tokens; PID 3/5 defaults in 3.11.
 - Feature `expand` numbering and nested order; type 307 for "first"; the SetDirectory anchor.
-- MajorUpgrade downgrade-row attributes, `LaunchCondition` blocking and `Disallow` bits (recorded as the builder's decision).
+- MajorUpgrade downgrade-row attributes, `LaunchCondition` blocking and `Disallow` bits (a producer policy rather than a file-format rule).
 - Service dependency terminator, `Wait` NULL, `MsiServiceConfig` keys; non-advertised class, MIME and type-library layouts.
 - Search chains other than a raw registry search; `MediaTemplate` with no files; merge-module details.
 
 ## 11. WiX v3 build semantics
 
-At bind time WiX derives every value the author left out; the tool reproduces the observable results with its own algorithms.
+At bind time WiX derives every value the author left out; any derived values described here are producer-specific, not universal on-disk requirements.
 
-Deliberate deviations: WiX's component GUIDs (D1), identifiers (D2) and short names (D3) come from internal hashes. The tool writes MSZIP where WiX writes LZX (D4; observed v3: `high` → LZX, 2²¹ window). It checks statically instead of running ICEs (D5), ships no DLLs (D6) and names itself in PID 18 (D7).
+Producer-specific differences: WiX's component GUIDs (D1), identifiers (D2) and short names (D3) come from internal hashes. A reference package may use MSZIP where WiX writes LZX (D4; observed v3: `high` → LZX, 2²¹ window). Validation strategy, bundled custom actions and PID 18 identity are producer-specific choices.
 
 ### 11.1 Identity and summary information
 
 - Product code and package code: authored, else a new random version-4 GUID per build, upper-case braced.
 - `SecureCustomProperties` is sorted ordinally (observed v5: `ARPNOMODIFY;ARPSYSTEMCOMPONENT;MSIRMSHUTDOWN;REINSTALLMODE;WIX_UPGRADE_DETECTED;…`).
-- Database code page: culture, else product, else 1252 in v3 and 65001 in v5 (observed). The tool picks 1252 when every string fits, else 65001.
+- Database code page: culture, else product, else 1252 in v3 and 65001 in v5 (observed). Choosing 1252 when possible or 65001 otherwise is an optional encoding profile.
 
 Reproducible mode (for example `SOURCE_DATE_EPOCH` set):
 
-1. Product code = UUIDv5(`{65752A03-A1B0-4D1D-A49C-CD1AEEB2D2F8}`, `"product|" + UpgradeCode + "|" + ProductVersion + "|" + culture`). The tool warns that every build of that version shares it.
+1. Product code = UUIDv5(`{65752A03-A1B0-4D1D-A49C-CD1AEEB2D2F8}`, `"product|" + UpgradeCode + "|" + ProductVersion + "|" + culture`). Reusing this deterministic code across builds is a producer-specific policy with identity implications.
 2. Package code = UUIDv5(same namespace, SHA-256 of the final database bytes with the package-code field zeroed).
 3. Every timestamp derives from `SOURCE_DATE_EPOCH`, so identical inputs give byte-identical packages, signatures aside.
 
@@ -863,9 +863,9 @@ Reproducible mode (for example `SOURCE_DATE_EPOCH` set):
 | 6 | `This installer database contains the logic and data required to install <ProductName>.` (observed v3 and v5) |
 | 7 | `<platform>;<languages>`: x86 `Intel`, x64 `x64`, ia64 `Intel64`, arm `Arm`, arm64 `Arm64`; e.g. `x64;1033` (observed) |
 | 9, 12, 13 | Package code; build time, both equal (observed) |
-| 14 | v3: 200 for 64-bit; v4+: 500. The tool defaults to 500. |
+| 14 | v3: 200 for 64-bit; v4+: 500. 500 is an optional reference-profile value. |
 | 15 | 2 compressed (observed); +1 short names only; +8 no elevation; 4 administrative image |
-| 18, 19 | The tool's name and version (WiX v3: `Windows Installer XML Toolset (3.x.y.z)`, observed); 2 (observed), 0 or 4 on request |
+| 18, 19 | The creating application's name and version (WiX v3: `Windows Installer XML Toolset (3.x.y.z)`, observed); 2 (observed), 0 or 4 on request |
 | 8, 11, 16 | Not written for products (observed) |
 
 ### 11.2 Generated identifiers
@@ -880,7 +880,7 @@ Prefixes: `reg` Registry, `rrg` RemoveRegistry, `cmp` Component, `fil` File, `di
 - A file key defaults to the filename if it is a legal identifier unique in the package. A component key defaults to its key-path resource's key.
 - Harvesting uses the identity `"cmp|"`, `"fil|"` or `"dir|"` + path below the harvest root (forward slashes, lower case). It makes one component per file, ordered by name.
 - Normalize harvest paths first: drop empty, `.` and trailing-slash segments. A harvester that kept them emitted directories with an empty name, which broke the build (reported). Identities never use random numbers, so a rebuild gives the same keys (reported).
-- A file without an explicit key whose default key collides with another file's (the same name in two directories) is an error naming both sources, never a silent drop. A builder that lost such File rows wrote components with empty key paths and still exited 0 (reported).
+- A file without an explicit key whose default key collides with another file's (the same name in two directories) is an error naming both sources, never a silent drop. One reported producer that lost such File rows wrote components with empty key paths and still exited 0 (reported).
 
 ### 11.3 Directory names and short names
 
@@ -896,14 +896,14 @@ A valid short name has 1–8 characters, optionally `.` and 1–3 more, with at 
 - `parentKey`: a file's component directory, a directory's parent, a shortcut's `Directory_`, or a `RemoveFile`/`IniFile` directory.
 - Scope: all names in the same directory, case-insensitive, including long names that are valid short names.
 - Observed shapes: `ab3x9_qz.go|averylongname.go`, `k2-fm0qw|Uninstall App`, `h7xq0d4m.dll|LongLibraryName.dll`; values differ (D3). `FileSearch` names never get one.
-- The tool gives every standard folder a fixed, distinct 8.3 name, so administrative layouts cannot collide.
+- The example reference profile gives every standard folder a fixed, distinct 8.3 name, so administrative layouts cannot collide.
 - With Word Count bit 1 only short names are stored; each long name must be valid or have an explicit short name.
 
 ### 11.4 Key paths and component GUIDs
 
 1. Explicit "directory is key path" → `KeyPath` NULL.
 2. Else the marked child: file, registry value (+0x4) or ODBC data source (+0x20). Two marked children are an error.
-3. Else the first file or registry value in definition order, else the directory. The tool warns on automatic choice.
+3. Else the first file or registry value in definition order, else the directory. Automatically choosing a key path should be recorded as a producer decision.
 
 Bit 0x100 marks components of 64-bit packages (observed v3 x64: 256 file, 260 registry; v5 also 1280 and 1792 from explicit options). GUID generation applies when no GUID is set. It fails for a directory or ODBC key path, or a file whose parents reach `TARGETDIR` before a standard directory such as `ProgramFiles64Folder`.
 
@@ -912,7 +912,7 @@ Bit 0x100 marks components of 64-bit packages (observed v3 x64: 256 file, 260 re
 3. Registry: `name = "registry|" + bitness + "|" + RootName + "\" + Key + "\" + ValueName`, with RootName HKCR, HKCU, HKLM, HKU or HKMU (root −1).
 4. `GUID = UUIDv5({D95C3988-291C-4681-A266-EC67FCCB1199}, UTF-8(lower-case(name)))`, upper-case braced. Lower-casing is simple Unicode mapping; `.` directories are skipped; properties stay unresolved.
 
-Extra files in the component only warn. Carry-over: the tool reads `Component(Component, ComponentId)` from a previous release and reuses each matching key's GUID. It reports the count and warns if the old key path names another file.
+Extra files in the component only warn. Carry-over: a reference migration process reads `Component(Component, ComponentId)` from a previous release and reuses each matching key's GUID. Previous-versus-new key-path differences require an explicit compatibility assessment.
 
 ### 11.5 File metadata
 
@@ -937,9 +937,9 @@ Observed v3: by File key case-insensitively within a disk (`Apple`, `banana`, `C
 
 - Explicit media: `Cabinet` = name, or `#` + name when embedded; NULL without compressed files.
 - `MediaTemplate`: `cab{0}.cab` from 1 (observed v3 and v5), `DiskId` = cabinet number. A new cabinet starts when the next file would exceed 200 × 2²⁰ uncompressed bytes (observed v5).
-- A larger file gets its own cabinet (observed v5: `cab2.cab`, `LastSequence` 9 → 10). The limit is configurable, also via `WIX_MUMS`. WiX does not embed by default; the tool does.
+- A larger file gets its own cabinet (observed v5: `cab2.cab`, `LastSequence` 9 → 10). The limit is configurable, also via `WIX_MUMS`. Cabinet embedding is a producer option, not a general MSI requirement.
 - Default compression: `mszip` in v3 (observed), `medium` in v4+.
-- One cabinet per `Media` row, files in sequence order, named by File key, one folder (observed v3). WiX v5 shares identical data (observed); the tool must not, but its reader must accept it.
+- One cabinet per `Media` row, files in sequence order, named by File key, one folder (observed v3). WiX v5 shares identical data (observed); Independent readers should account for identical content represented through shared cabinet storage.
 - `none` → stored; `mszip` → MSZIP; `low`/`medium`/`high` → MSZIP at deflate 3/6/9, or LZX. Entry time = source mtime in DOS local time or `SOURCE_DATE_EPOCH`; attributes 0x20 (observed).
 - Embedded cabinets go to `_Streams` without the `#`. Uncompressed files go to `<outputdir>/<source path>`, where `.` adds nothing.
 
@@ -991,7 +991,7 @@ The separator defaults to `;`. Create cannot combine with `[~]`, so append or pr
 
 **Unverified (chapter 10):**
 
-- `File.Language` WiX writes for a versioned file without translations (the tool writes `0`); PID 14 default for 32-bit v3.
+- `File.Language` WiX writes for a versioned file without translations (one reference profile writes `0`); PID 14 default for 32-bit v3.
 - Whether the cabinet limit compares with > or ≥; WiX's behaviour when a numbered block hits another fixed number.
 - Downgrade-row attributes (for example 0x100), and `LaunchCondition` versus a type-19 block; the modularization exclusion list.
 
@@ -1069,7 +1069,7 @@ An independent implementation recomputed the signed digest of three real vendor-
 
 This confirms SigOrder for ordinary names, the CLSID-last walk, the v4 pre-hash, and that root times are not hashed. No package has sub-storages, prefix names or a root name sorting before DSE.
 
-A Windows CI job with a self-signed test certificate settles the rest (chapter 11 §11). The tool's digest must equal that of `signtool sign /fd SHA256`, and `signtool verify /pa /v` must pass. `Get-AuthenticodeSignature` must report `Valid`, and `HashMismatch` once a single byte is flipped.
+A Windows CI job with a self-signed test certificate settles the rest (chapter 11 §11). The independently calculated digest can be compared to that of `signtool sign /fd SHA256`, and `signtool verify /pa /v` must pass. `Get-AuthenticodeSignature` must report `Valid`, and `HashMismatch` once a single byte is flipped.
 
 ### Unverified
 
@@ -1091,7 +1091,7 @@ Evidence: WiX documentation (no source code), WiX 3.11 packages, and a WiX 5.0.2
 - v3 is maintenance-only since v4; its last patch is 3.14.1 (March 2024).
 - v6 makes use subject to the Open Source Maintenance Fee: organizations earning revenue with WiX must sponsor it.
 - v7 adopts OSMF EULA 1.1: no fee below US$10,000 annual revenue, and builds need explicit EULA acceptance.
-- None of this affects generated packages or the tool, which contains no WiX code.
+- These comparisons describe producer output, not a required implementation architecture.
 
 ### Output deltas
 
@@ -1130,7 +1130,7 @@ Unchanged (obs): `_Validation` rows (four descriptions differ only in whitespace
 | R6 | Split at MB × 2²⁰ (default 200); an oversized file gets its own cabinet | R19 | Omit LaunchConditions when there are no rows |
 | R7 | MAY store identical files once per cabinet; SHOULD NOT in v1 | R20 | Add anchor-only standard actions at their default number |
 | R8 | Per-machine `ALLUSERS=1`; never v3's "no scope" state | R21 | New random ProductCode and package code per build; reproducible mode per chapter 10 §8.1 |
-| R9 | Offer per-user and both dual-purpose scopes; dual-purpose needs version ≥ 500 | R22 | MAY derive UpgradeCode from a name, with the tool's own namespace |
+| R9 | Offer per-user and both dual-purpose scopes; dual-purpose needs version ≥ 500 | R22 | MAY derive UpgradeCode from a name, with a producer-defined namespace |
 | R10 | Generate component GUIDs; support carry-over | R23 | Subject = product name, Keywords = `Installer`, Comments = the fixed sentence |
 | R11 | 0x100 from the package architecture, with 32/64 overrides | R24 | `CreateFolder` for a component without resources |
 | R12 | A fixed, distinct 8.3 `DefaultDir` per standard folder | R25 | MAY add a default feature and `INSTALLFOLDER` (`<Manufacturer> <ProductName>`) |
