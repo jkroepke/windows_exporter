@@ -29,6 +29,7 @@ As of 2026-10-25.
 - [17. The engine without custom-action code](#17-the-engine-without-custom-action-code)
 - [18. Reference chapters](#18-reference-chapters)
 - [Appendix B. Pitfalls and checks](#appendix-b-pitfalls-and-checks)
+- [Appendix C. Windows validation test matrix](#appendix-c-windows-validation-test-matrix)
 
 ## Purpose and scope
 
@@ -241,6 +242,14 @@ Unverified:
 - The oldest engine accepting a UTF-8 database code page (the observed package needs 5.0).
 - Transform encoding of dropped tables, columns and wide masks; `MergeModule.CABinet` as a plain `_Streams` entry. (Sorted rows are required: "Columns and tables" above.)
 
+### Lossless database serialization
+
+An MSI database declares its string encoding through the `_StringPool` code page. Stored string bytes MUST use that code page, not an implicit programming-language encoding. The long-reference flag, the string ID width (two or three bytes), extended string lengths, refcounts and physical row widths MUST agree everywhere, `_Tables` and `_Columns` included. An encoder either represents the requested value correctly or returns an explicit error: truncating lengths, saturating counts, wrapping IDs, replacing undecodable text or silently substituting another code page is not a successful serialization.
+
+**Column-major layout also applies to the system catalogs.** A reader MUST NOT parse `_Columns` as row-major records. Unknown tables, empty catalog entries, binary payload streams, embedded sub-storages and signature streams must stay distinguishable. A read-modify-write implementation either preserves these objects or reports explicitly that it cannot; it never drops data while returning success.
+
+These are format and integrity requirements for a conforming, lossless serializer, not claims that native Windows accepts every out-of-range or malformed variant. Native acceptance is a separate experiment (Appendix C, `DB-*` and `RUST-*` cases).
+
 ## 4. Summary information
 
 `\u0005SummaryInformation` (literal name) is a one-section property set from which the installer reads platform, language, package code, minimum version and source type.
@@ -431,6 +440,10 @@ Validators (ICE03, ICE06, ICE32) read `_Validation`, the installer does not, and
 - What to write when an `MsiFileHash` word is 0x80000000 (default: omit the row).
 - Handling of malformed registry `#` values (builders SHOULD reject them).
 - An `Environment` name with no prefix character (assumed `=-`).
+
+### 6.5 `MsiFileHash` identity and hash provenance
+
+The standard table is **`MsiFileHash`**, not `FileHash`; a table named `FileHash` is not interchangeable with it and the engine ignores it. Its columns are `File_`, `Options`, `HashPart1` … `HashPart4`. A row applies to an unversioned file, `Options` is 0, and the four words are what the native `MsiGetFileHash` API (or the Installer object's `FileHash` method) returns. Toolchain packages hold the file's MD5 as four little-endian signed 32-bit words (observed; appendix A.6), and WiX fills the table from `MsiGetFileHash` (source), so the two agree on every sample seen; a producer that computes MD5 itself SHOULD still confirm against the native API on at least an empty, an ASCII and a binary file (Appendix C, `RUN-12`, `RUST-12`). [Microsoft table specification](https://learn.microsoft.com/en-us/windows/win32/msi/msifilehash-table).
 
 ## 7. User interface
 
@@ -1130,6 +1143,10 @@ A Windows CI job with a self-signed test certificate settles the rest (chapter 1
 - Order of a name that is a proper prefix of another (spec: shorter first; writer SHOULD warn); position of P (conflict; spec: sorted).
 - Low-dword sizes for streams ≥ 4 GiB; layout independence on Windows; `MsiDigitalSignature.Hash` content; the signed-cabinet reserve layout.
 
+### Signatures and edit or rewrite operations
+
+An MSI can stay structurally readable while its Authenticode signature becomes invalid after an edit or a repack. An editor either preserves the signature streams and **reverifies** them after the change, or removes or replaces the stale signature and reports the changed signing status. Signature streams are never treated as payload cabinets, and a successful self-round-trip is not signature verification (Appendix C, `SIG-03`, `RUST-10`).
+
 ## 13. WiX v4 and later
 
 These are WiX producer-specific output comparisons. R1–R26 are optional reference-profile choices, not normative Windows Installer format requirements.
@@ -1350,6 +1367,25 @@ The supplied x64 samples were inspected statically. msi.dll exports MsiOpenDatab
 | msiexec.exe | `6c63cfd4cb36998e9ff763117d4a74193ba72a5fc7f51ea7210f9065c2188452` |
 | cabinet.dll | `9e5e94280b3f6f4249ce4f1e78625372a66f01fefa3d2132a180f84c5c4ba7ff` |
 
+### Further implementation audit: SamuelMarks/msi-rs
+
+**Source-inspection findings, not Windows test outcomes.** Reviewed commit [`06658371eeef65edee451a51b0c5abe975192bf7`](https://github.com/SamuelMarks/msi-rs/tree/06658371eeef65edee451a51b0c5abe975192bf7) of a third, Rust implementation. A source-level unsafe conversion is established by reading the code; native rejection and public-API impact need reproduction, which the `RUST-` cases of Appendix C are for.
+
+| Area and source | Observed code path | Generalized conformance hazard | Cases |
+| --- | --- | --- | --- |
+| [String pool](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/database/string_pool.rs) | Serializes each string length as `bytes.len() as u16`, caps refcounts at 65535, parses each four-byte entry normally and decodes with `String::from_utf8_lossy` | Long strings, overflow and declared-code-page fidelity require exact boundaries and no silent corruption | RUST-01–04 |
+| [Package serialization](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/package.rs) | Creates a CP1252 string pool while the pool writer emits UTF-8 bytes, calls record serialization with 2-byte IDs, and uses native-sized assumptions | Real code pages and long references must be validated against an independent decoder | RUST-03–05 |
+| Same package reader | `_Columns` parsed in row chunks, while regular tables are decoded column-major; malformed records may be skipped | Catalog decoding errors can cause an incomplete or misleading schema | RUST-06–07 |
+| Same package reader and writer | Non-table streams are placed in an embedded-cabinet map and emitted on rewrite; nested storages are read but not restored by `to_bytes`; empty tables are dropped | A successful parse and rewrite must not lose opaque streams, binary columns, empty tables or nested storages | RUST-08–10, RUST-18 |
+| [Table definitions](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/database/tables/core.rs) and [binder](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/wix/linker/binder.rs) | Declares and writes `FileHash` instead of `MsiFileHash`; computes MD5-derived words directly | Standard table name and native hash semantics must be checked against Windows, not a self-test (section 6.5) | RUST-11–12 |
+| Same binder | `writer.build().unwrap_or_default()` can turn a CAB generation failure into zero bytes; unresolved inputs can be skipped; `File.Sequence` is bounded with an `i16::MAX` fallback | Missing resources and overflow must fail visibly; media sequence and order need native install verification | RUST-13–15 |
+| [CAB writer](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/cab/writer.rs) | Uses fixed CAB timestamps and substitutes raw blocks if LZX state initialization fails | Output metadata, compressed-block encoding and error propagation require independent FDI checks | RUST-16 |
+| [Package metadata paths](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/package.rs) | One construction path sets the summary Revision Number to the ProductCode, another derives a package code separately | PackageCode and ProductCode are distinct identities (section 8.1); test rebuilds and upgrades | RUST-17 |
+| [CFB reader](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/cfb/reader.rs) | Nested-storage extraction traverses sibling children and uses `unwrap_or_default()` on stream read failures | Recursive sub-storage preservation and error fidelity must be demonstrated | RUST-18 |
+| [Stream name codec](https://github.com/SamuelMarks/msi-rs/blob/06658371eeef65edee451a51b0c5abe975192bf7/crates/msi/src/cfb/stream_name.rs) | Encoder rejects characters outside the 64-character alphabet instead of writing literal UTF-16 units | Encoding must handle valid literal characters and packed segments without silent renames (section 3) | RUST-20 |
+
+**Scope:** the project advertises a broad replacement for WiX and Windows Installer; the table does not assert that those features are incomplete. It identifies paths with interoperability risk to check on a disposable VM against Microsoft's engine, native cabinet FDI and an independent reader. Self-round-trip and unit-test coverage are not proof of native acceptance.
+
 ## 17. The engine without custom-action code
 
 Windows Installer does most of what a package needs from its own tables. This section lists what it does natively, what the two open-source toolchains could not get from it and reached for code instead, and what a package can do in each case while shipping no custom-action DLL. msitools' `wixl` is the existence proof: it writes nothing but tables (section 17.4) and its packages install.
@@ -1457,7 +1493,7 @@ The detailed chapters and schema files referred to above are not contained in th
 
 ## Appendix B. Pitfalls and checks
 
-Every pitfall below has cost someone an install on a customer's machine. Each row names the symptom Windows shows, a check that catches it before Windows does, and the section with the rule. Checks marked **static** need only the package; **ICE** names the validation rule that catches it when the ICE cubes run (section 14); **Windows** needs an install with `msiexec /i pkg.msi /l*vx log.txt` and a search of the log.
+Every pitfall below has cost someone an install on a customer's machine. Each row names the symptom Windows shows, a check that catches it before Windows does, and the section with the rule. Checks marked **static** need only the package; **ICE** names the validation rule that catches it when the ICE cubes run (section 14); **Windows** needs an install with `msiexec /i pkg.msi /l*vx log.txt` and a search of the log. Appendix C turns the Windows checks into an executable test matrix with case IDs.
 
 ### B.1 Container, database and summary
 
@@ -1539,3 +1575,131 @@ Every pitfall below has cost someone an install on a customer's machine. Each ro
 4. **Windows:** install with `/l*vx`, then repair, uninstall, upgrade from the previous release and attempt a downgrade. Search the log for `Note: 1: 2` (internal errors 2xxx), `Return value 3`, `Error 1`, `1402`, `1403` and `Disallowing installation of component`; any hit is a defect until explained.
 5. **Rollback:** install once with a deliberately failing deferred action in the position of the package's own actions and confirm that the product is gone from Apps & features afterwards (W17).
 6. **Signing:** `signtool verify /pa /v` and `Get-AuthenticodeSignature` report `Valid`; flipping a byte reports `HashMismatch` (section 12).
+
+## Appendix C. Windows validation test matrix
+
+**Status: proposed, not executed.** These tests are for agents working on a disposable Windows development VM. Their job is to falsify or substantiate particular claims in this specification. A successful reader round trip is not proof that `msiexec` accepts a package. Every result below is **Not run**.
+
+### Agent execution rules
+
+1. Use a dedicated VM and snapshot. Never run intentionally malformed installers or service, registry or environment mutation tests on a production or everyday workstation. Preserve the original Windows binaries; do not replace system `msi.dll`, `msiexec.exe` or `cabinet.dll`. Restore snapshots between stateful installation tests.
+2. Record the Windows edition and build, architecture, locale, privilege, the `msi.dll` and `cabinet.dll` file versions and SHA-256 hashes, toolchain versions or commits, exact commands, and any test-certificate setup. Windows 11 x64 or Server 2025 x64 is the baseline; legacy Windows and Arm64 are optional separate guests.
+3. Start from a **known-good unsigned minimal MSI**, verified by both the native database API and a full install and uninstall. Change one variable per negative or boundary variant. Recalculate unrelated length and checksum fields when needed, otherwise failures become ambiguous. Keep a byte-for-byte original control for each experiment.
+4. Treat each case as three conformance levels (section 14): **S** = structural CFB, MSI and CAB decoding; **A** = native Windows API open, query, commit or cabinet FDI; **I** = installation, repair, upgrade or uninstall. Run only the levels indicated; record each outcome independently.
+5. For each case and variant, create `results/<case-id>/<variant>/` containing the fixture or a reproducible generator, SHA-256, input parameters, API return codes, raw and decoded stream dumps, logs (`msiexec /L*V` for I), output hashes, and a `result.md` stating the precise claim, the baseline control, the observed outcome, the Windows build and the section references.
+6. Mark each result **Confirmed**, **Contradicted**, **Inconclusive** or **Blocked**, with a link to the evidence. The labels apply only to the specific hypothesis and environment. Reproduce unexpected behaviour in a clean snapshot. Never mark a test Confirmed because a tool returned exit code 0.
+
+**Priority:** P0 = foundational; P1 = important unresolved compatibility claim; P2 = expensive, optional or OS-specific. Fixtures mentioned in this document (for example `test-vectors/minimal.msi`) may not be checked into this repository; if missing, generate and label a substitute rather than claiming the published vector was tested.
+
+### Test cases
+
+| ID | Priority | Levels | Controlled fixture / variants | Steps and question to settle | Result |
+| --- | :---: | :---: | --- | --- | --- |
+| ENV-01 | P0 | S/A | Verified unsigned one-file MSI | Inventory exact OS build, locale, privilege, `msi.dll`/`cabinet.dll` versions and SHA-256; query all database tables via native APIs. Verify source MSI hash and control fixture validity. | Not run |
+| ENV-02 | P0 | S/A/I | Equivalent WiX and msitools one-file packages | Produce both with pinned tool versions; compare streams, SummaryInformation, tables and CAB content. Open and install/uninstall both; separate producer differences from format constraints. | Not run |
+| CFB-01 | P0 | S/A | Same logical MSI in CFB v3 vs v4 containers | Hold every logical stream byte constant; validate with a CFB reader, call `MsiOpenDatabaseW` on both, compare tables and native return codes. | Not run |
+| CFB-02 | P1 | S/A | Correct, zero and one-byte-mutated root CLSID | Change only the root directory CLSID and record generic-CFB versus native-MSI acceptance or error. | Not run |
+| CFB-03 | P1 | S/A | Empty stream start = ENDOFCHAIN, FREESECT, sector 0 | Keep size zero. Test CFB enumeration and native open/query/commit; determine the start-sector rule (section 2). | Not run |
+| CFB-04 | P1 | S/A | Identical sibling links with red-black, all-black and invalid colours/heights | Preserve sorted sibling names and payloads; separately mutate colours and links, then test native reader behaviour and independent tree validation. | Not run |
+| CFB-05 | P1 | S/A | Encoded table name, literal CAB and `Binary.Key` streams | Check actual UTF-16 directory names and native table/binary extraction, including a name beginning with U+0005. | Not run |
+| CFB-06 | P1 | S/A | Case variants, prefix-related sibling names, correct/incorrect sibling order | Generate separate CFB variants with valid names; compare native opening, stream lookup and error handling. | Not run |
+| CFB-07 | P2 | S/A/I | Large packages: near 2 GiB v3; 1, 2.2, 3 GiB v4 | Use a disposable VM with adequate disk; check the v4 threshold, range-lock sector and native open. Attempt `/i` and `/a` only with valid installable packages. | Not run |
+| DB-01 | P0 | S/A | Native-written `_StringPool`, `_StringData`, `_Tables`, `_Columns` | Decode raw catalog and column-major streams with two readers; compare all rows with native `MsiDatabaseOpenViewW` results. | Not run |
+| DB-02 | P0 | S/A | Nullable i2/i4/string/binary custom columns | Commit and reopen integer boundaries, NULLs and non-NULLs; compare raw biased integer encoding against native query values. | Not run |
+| DB-03 | P0 | S/A/I | Identical Property rows sorted vs physically shuffled | Mutate stream row order only; query ProductCode and other keys natively, then attempt installation. Expect error 2211 and return 1605 for the shuffled variant (section 3). | Not run |
+| DB-04 | P0 | S/A | Stored string lengths 65534, 65535, 65536, 70000 bytes | Create valid adjacent strings, save through the native API, inspect the long-entry word order (`0, refcount, low, high`) and query all values after reopening. | Not run |
+| DB-05 | P1 | S/A | One string referenced 65534, 65535, 65536, 70000 times | Build a valid table with distinct primary keys; commit, inspect refcount overflow behaviour and verify all rows natively. | Not run |
+| DB-06 | P1 | S/A | String-ID threshold around 65535 distinct values | Account for system catalog strings; determine when 2-byte row references become 3-byte and when the long-reference flag is set. | Not run |
+| DB-07 | P1 | S/A | Custom tables with 31, 32, 33 columns | Run native CREATE TABLE, execute, commit, reopen and SELECT for each. Capture the error and raw serialization; 33 is expected to fail (section 3). | Not run |
+| DB-08 | P1 | S/A/I | Database code pages 1252, 65001, a non-Western page | Round-trip non-ASCII values through native query APIs, record decoded bytes and attempt a valid package installation. | Not run |
+| DB-09 | P1 | S/A/I | Empty table catalog row with no stream vs empty physical stream | Query and recommit via native APIs and compare installability with a known-good control. | Not run |
+| DB-10 | P1 | S/A/I | Complete, missing and empty `_Validation` table | Separate ICE validation results from native DB opening and actual installation; determine whether the runtime needs `_Validation`. | Not run |
+| DB-11 | P1 | S/A | Binary column stream with one/two keys and an absent-stream variant | Compare stream naming (62-character limit), raw bytes, `MsiRecordReadStream` results and the failure mode on missing data. | Not run |
+| DB-12 | P2 | S/A | Valid MST with added/deleted row and column changes | Create and apply a native transform, inspect raw transform streams against section 3, record changes and any unsupported schema mutation. | Not run |
+| DB-13 | P2 | S/A | Broken CFB chain, out-of-range sector, corrupt pool or row count | One mutation per fixture. Compare native open error versus two parsers; record crashes safely without running the installer. | Not run |
+| DB-14 | P1 | S/A/I | Summary SystemIdentifier 0x00020005 vs 0x00020006 | Change only the property-set header; native open and install both. Settles W14's first half (section 4). | Not run |
+| SUM-01 | P0 | S/A | Valid summary PIDs 1, 7, 9, 14 and 15 | Read via `MsiSummaryInfoGetPropertyW` and an independent OLE property decoder; verify types, values and raw bytes. | Not run |
+| SUM-02 | P1 | S/A/I | Template `x64;1033` vs `x64;1033,1031` vs `Intel;0` | Change only PID 7. Compare native open and install in a compatible locale and architecture; determine multi-language package behaviour. | Not run |
+| SUM-03 | P1 | S/A/I | Page Count PID 14 = 100, 150, 200, 301, 405, 500 | Hold architecture and package constant; compare native open, ICE and install errors, then vary the platform token. | Not run |
+| SUM-04 | P1 | S/A | Summary code pages 1252, 65001, 1200; LPSTR vs LPWSTR | Read and write through native APIs, decode raw property-set type and bytes, record rejection or canonicalization. 65001 is expected to fail to open (section 4, W14). | Not run |
+| SUM-05 | P2 | S/A/I | PID 15 Word Count 0, 1, 2, 4, 8, 10 | Install in isolated admin and standard-user sessions; record compression, source and elevation effects separately from summary acceptance. | Not run |
+| SUM-06 | P2 | S/A | Fixed UTC FILETIME and malformed Revision Number GUID | Verify native parsing of PID 12/13/9, time zones and invalid type/GUID behaviour. Preserve raw bytes. | Not run |
+| CAB-01 | P0 | S/A/I | Same file: no cabinet, stored CAB and MSZIP CAB | Extract with native FDI and an independent tool, then install through MSI. Compare installed SHA-256 and media handling. | Not run |
+| CAB-02 | P0 | S/A/I | MSZIP input crossing at least three 32768-byte blocks | Use cross-block repeated patterns; validate FDI and MSI extraction byte for byte, including a variant without dictionary continuity. | Not run |
+| CAB-03 | P1 | S/A | MSZIP trailing empty final DEFLATE block present/absent | Verify DEFLATE validity independently, then test FDI extraction; identify which variants native cabinet.dll accepts. | Not run |
+| CAB-04 | P1 | S/A | Alter CAB minor version, cbCabinet, checksum and reserve data individually | Call `FDIIsCabinet` and `FDICopy` for each mutation; capture exact acceptance and errors. | Not run |
+| CAB-05 | P1 | S/A/I | Zero-byte file, zero-file folder, embedded/external CAB | Check native extraction and the actual installed directory and file state against CAB and Media metadata. | Not run |
+| CAB-06 | P1 | S/A/I | Two CABs; correct/wrong Media.LastSequence across the boundary | Exercise embedded and external sources; log cabinet selection, extraction, source prompts and final installed hashes. | Not run |
+| CAB-07 | P2 | S/A | Cabinet file entry name 254/255/256 bytes | Test FDI extraction with a valid control and an optional non-ASCII variant; record the enforced name limits. | Not run |
+| CAB-08 | P2 | S/A/I | Real LZX reference CAB and continued-folder cabinet set | Compare native FDI, msitools and MSI payload handling. Record compression window and continuation errors, and the DiskId-order rule (error 2350, section 5). | Not run |
+| CAB-09 | P2 | S/A | Cabinets with 65535 and 65536 entries; duplicate content once per cabinet | Build with FCI and by hand; `FDICopy` both; check that the smart-cabbed duplicate extracts with its own date and attributes (section 5, W15). | Not run |
+| CAB-10 | P2 | S/A/I | `.msi` of 2.1 GB made of three 700 MB embedded cabinets, and the same cabinets external | Native open and install both; expect "The system cannot open the device or file specified" for the embedded variant (section 5, W15). | Not run |
+| RUN-01 | P0 | S/A/I | Published A.5 minimal MSI if present, else a labelled substitute | Open and query; `msiexec /i ... /qn /norestart /L*V`, verify the installed file, `/x`, verify removal; mark a missing published fixture explicitly. | Not run |
+| RUN-02 | P0 | A/I | Old/new versioned EXEs, fixed component keys | Install old; upgrade to new; repair in a clean snapshot. Compare File.Version fields, real executable resources, logs and installed hashes. | Not run |
+| RUN-03 | P0 | A/I | Related products: higher, equal, lower ProductVersion | Vary ProductCode and PackageCode correctly, preserve UpgradeCode; exercise FindRelatedProducts and RemoveExistingProducts sequencing, downgrade and rollback. | Not run |
+| RUN-04 | P1 | A/I | Downgrade restriction via Upgrade+LaunchCondition vs type-19 action | Attempt a downgrade; compare exit codes and log sequence. Ensure the earlier version remains installed after the failure. | Not run |
+| RUN-05 | P1 | A/I | Disposable test service using ServiceInstall/ServiceControl, `MsiServiceConfig`, and `MsiServiceConfigFailureActions` with a restart action | Install, start, repair, stop, uninstall; inspect `sc.exe qc`/`qfailure` and the registry, the service key path and Wait behaviour; expect error 1939 for the failure-actions variant and success for the `sc.exe failure` recipe (sections 10.3, 17.3). | Not run |
+| RUN-06 | P1 | A/I | ALLUSERS 1/2 and MSIINSTALLPERUSER, dual context | Use admin and standard user sessions. Verify actual file system, HKCU/HKLM, Apps & features and elevated execution; compare summary 0x8. | Not run |
+| RUN-07 | P1 | A/I | 32-bit vs bit-0x100 components (x64; Arm64 optional) | Install a disposable registry-value component; inspect native and WOW6432Node views and logs for each variant. | Not run |
+| RUN-08 | P1 | A/I | Environment name flags `=-*`, `+-`, `=-`, PATH `[~]` | Snapshot user and machine environment; install, repair and uninstall; compare exact values, removal and permanence. Observe whether a running Explorer sees the change without a broadcast (W16). | Not run |
+| RUN-09 | P1 | A/I | Public property with/without SecureCustomProperties and deferred use | Run an elevated install with a distinct property value; inspect execute-sequence visibility and verbose logs, not just UI output. | Not run |
+| RUN-10 | P1 | A/I | ControlEvent blank vs `1` conditions and a valid/invalid tab ring | Launch the interactive full UI; capture actual transitions, tab order and MSI error messages (2834). Do not infer UI behaviour from `/qn`. | Not run |
+| RUN-11 | P2 | A/I | Same ProductCode with changed PackageCode and a same-code control | Install and run maintenance and reinstall; capture native exit and error codes, including whether error 1638 occurs. | Not run |
+| RUN-12 | P1 | A | Known empty and non-empty files; raw MD5 comparison | Call `MsiGetFileHashW`; compare the four signed 32-bit parts with the raw 128-bit hash and `MsiFileHash` rows (section 6.5). | Not run |
+| RUN-13 | P1 | A/I | Per-user package with a failing deferred action after `PublishProduct` and the same action after `InstallFiles` | Install, let the action fail, inspect Apps & features and `HKU\<SID>\Software\Microsoft\Installer\Products`; expect leftover registration for the first variant (section 8.2, W17). | Not run |
+| RUN-14 | P1 | A/I | Raw `RegLocator` search of a `REG_MULTI_SZ` value into a public and a private property | Full UI: feature tree and uninstall button after the search; expect the public variant to misbehave (section 8.7). | Not run |
+| RUN-15 | P1 | A | `Signature` row with `MinVersion` on `ucrtbase.dll` in `SystemFolder` and on a copied private DLL | Compare the search result with the file's actual version on Windows 10+ (section 8.6). | Not run |
+| RUN-16 | P2 | I | TrackDiskSpace dialog with a Text control reading `[INSTALLDIR]` with and without a trailing space | Full UI; observe whether the text updates after a folder change (section 7.2, W18). | Not run |
+| RUN-17 | P1 | A/I | `RemoveExistingProducts` at 1401, 1501, 6551, 6601 and at 5802 | Install over an older version; expect error 2613 only for 5802 (section 9.2). | Not run |
+| RUN-18 | P1 | I | Deferred custom action returning 259, 1602, 1603 and an EXE action exiting 1 with and without Continue | Verbose logs and exit codes; confirm 259 ends the install successfully and skips later actions (section 8.11). | Not run |
+| SIG-01 | P0 | S/A | Unsigned control signed with a disposable RSA test certificate | Sign using `signtool sign /fd SHA256`; decode the PKCS#7, compute the logical MSI digest, verify with signtool and `Get-AuthenticodeSignature`. | Not run |
+| SIG-02 | P1 | S/A | Signed packages with and without MsiDigitalSignatureEx | Capture exact signature streams, compute the pre-hash P and the content digest D; determine whether SignTool emits DSE. | Not run |
+| SIG-03 | P1 | S/A | Repack a signed MSI with different sectors, order and timestamps | Keep logical stream bytes fixed; modify one metadata dimension per case. Compare basic vs extended signature validity. | Not run |
+| SIG-04 | P1 | S/A | Prefix-related stream names and names before/after DSE | Use valid signed fixtures; compute candidate stream sort orders and compare with Windows signature verification. | Not run |
+| SIG-05 | P1 | S/A | Nested storage containing a signature-named stream; CLSID mutation | Vary nested data, name and CLSID independently; check the signed digest and exclusion scope with the native verifier. | Not run |
+| SIG-06 | P2 | S/A | RSA SHA-256/384/512, ECDSA where supported | Sign and verify each combination; document Windows build, certificate and algorithm-specific failures. | Not run |
+| INT-01 | P0 | S/A/I | Equivalent WiX and msitools packages | Pin version or commit; diff normalized table semantics, native open, install/uninstall and raw stream hashing. Identify producer-only decisions. | Not run |
+| INT-02 | P1 | S/A | WiX MSI round-tripped by libmsi and then a native commit | Compare raw streams and decoded tables and native file extraction after each round trip; note semantic vs incidental changes. | Not run |
+| INT-03 | P1 | S/A | Minimized failures from the msitools bug tracker (section 16) | Run identical malformed input through the native MSI API, msitools and an independent CFB/CAB reader; distinguish tool bugs from Windows rejection. | Not run |
+
+### msi-rs regression cases
+
+These cases supplement the ones above. They are test hypotheses motivated by the code review in section 16 (`SamuelMarks/msi-rs@06658371`), not recorded Windows results. Reproduce with independent fixtures and native Windows, report unsupported implementation features separately from invalid MSI format, and leave every outcome `Not run` until executed.
+
+| ID | Priority | Levels | Controlled fixture / variants | Steps and question to settle | Result |
+| --- | :---: | :---: | --- | --- | --- |
+| RUST-01 | P0 | S/A | 65535- and 65536-byte pooled string with adjacent strings | Compare the native-written extended length encoding with independent parsing. Detect a truncated 16-bit length and corruption of the next entry. | Not run |
+| RUST-02 | P1 | S/A | One string referenced 65535, 65536, 70000 times | Generate a unique-key table referencing the same value. Inspect the stored refcount and native query completeness; a writer must reject overflow rather than clamp silently. | Not run |
+| RUST-03 | P0 | S/A | String IDs 65534–65537 in catalog and user tables | Generate enough distinct strings to cross the reference-width threshold. Verify the long-reference flag and 3-byte references in all table streams; detect 16-bit ID truncation. | Not run |
+| RUST-04 | P0 | S/A | CP1252 `0xE9` and `0x80`, valid UTF-8 equivalents | Read and write matching independent fixtures; compare Unicode values from native queries, byte-exact decoded strings and no lossy replacement. | Not run |
+| RUST-05 | P0 | S/A/I | Database code page 1252 or 65001; non-ASCII Property, file name, table text | Serialize and reopen through the candidate tool; inspect the code-page header and raw string bytes, native query and installed path. Reject invalid code-page and encoding combinations. | Not run |
+| RUST-06 | P0 | S/A | Native `_Columns` with at least four different ordinal/name/type rows | Decode the raw column-major catalog, reconstruct the schema with the candidate reader, then write and reopen. Compare every schema row against a native Windows export. | Not run |
+| RUST-07 | P0 | S/A | Valid catalog plus one malformed catalog row | Test parser errors, incomplete schema detection and whether a round trip silently drops bad rows. Accept only an explicit loss or error policy. | Not run |
+| RUST-08 | P0 | S/A/I | MSI with an empty table, a Binary DLL, an Icon stream and an embedded CAB | Read and write the unmodified MSI. Compare table catalog membership, every non-summary stream SHA-256, installed file and binary reference resolution. No silent data loss. | Not run |
+| RUST-09 | P1 | S/A | MSI with a nested sub-storage and an unknown opaque root stream | Compare the full tree of names, stream contents and storage CLSIDs before and after rewrite; a missing object must produce an explicit error if preservation is unsupported. | Not run |
+| RUST-10 | P0 | S/A | RSA-signed MSI, with and without MsiDigitalSignatureEx | Read and save without requested content changes. Verify via signtool and `Get-AuthenticodeSignature`, compare signature streams and record explicit invalidation or removal if rewritten. | Not run |
+| RUST-11 | P0 | S/A/I | Unversioned file with the documented `MsiFileHash` vs a wrong `FileHash` table | Create both variants with otherwise identical tables, open natively and install, then repair a corrupted file. Establish table name and runtime consumption. | Not run |
+| RUST-12 | P0 | S/A | Empty, ASCII and binary files with the native hash as control | Compare all four 32-bit `MsiGetFileHashW` outputs to generated table fields, including signed interpretation and endianness. | Not run |
+| RUST-13 | P0 | S/A | Missing source file and a stale CAB from a prior build | Build with one missing required File source; confirm a non-zero failure and no valid-looking MSI with missing payload. Inspect File, Media and CAB contents. | Not run |
+| RUST-14 | P0 | S/A | Injected CAB writer failure or invalid compression input | Force a packaging error and verify error propagation; reject a zero-length CAB with a successful build result. Then extract the control CAB with FDI. | Not run |
+| RUST-15 | P1 | S/A/I | Multi-CAB File.Sequence across the 32767 boundary and permuted files | Compare every File.Sequence with the physical cabinet entry order and Media.LastSequence. Detect duplicate or clamped sequences; verify native installation at a supported size. | Not run |
+| RUST-16 | P1 | S/A | LZX valid vs invalid window; raw and MSZIP CAB controls | Inspect the CFFOLDER compression type and actual CFDATA bytes; call native FDI. Mislabelled raw blocks or a silent compressor fallback fail. | Not run |
+| RUST-17 | P0 | S/A/I | Rebuild an MSI with the same ProductCode, a different PackageCode and a shared UpgradeCode | Check Property.ProductCode, the PID 9 package GUID and related-product behaviour with native query, install and repair; distinguish the identities. | Not run |
+| RUST-18 | P1 | S/A | Nested storage with a grandchild, a stream and a broken-chain variant | Extract recursively and compare all stream hashes and CLSIDs; report read failures instead of returning empty bytes. | Not run |
+| RUST-19 | P1 | S/A | Identical inputs, fixed timestamps and IDs, shuffled insertion order | Build in at least 20 fresh processes and on two hosts if possible. Compare raw hashes, object ordering and logical table equality. Mark nondeterminism as producer behaviour. | Not run |
+| RUST-20 | P1 | S/A | Stream names with a valid literal `-` and Unicode BMP characters plus packed alphabet segments | Construct native-readable CFB names within 31 UTF-16 units; verify the codec preserves valid literal characters and packed segments on a round trip. | Not run |
+
+### Suggested order and dependencies
+
+Start with `ENV-01`, `ENV-02`, `DB-01`, `CAB-01`, `RUN-01`, `RUST-06`, `RUST-08` and `RUST-11`; no malformed-input, signature or cross-implementation finding should be accepted without a working control. Run the structural and API stages before the installation stage. Use a separate VM snapshot for each test that installs, upgrades, writes registry keys, changes the environment, starts a service or modifies test-certificate trust.
+
+**Mapping to the section 14 experiments:** W1 = `CFB-07`; W2 = `DB-08`/`SUM-03`; W3 = `DB-05`; W4 = `SUM-02`; W5 = `RUN-03`/`RUN-04`; W6 = `SIG-02`/`SIG-04`/`SIG-05`; W7 = `RUN-01`; W8 = `DB-07`; W9 = `CAB-01`/`CAB-03`; W10 = `CFB-03`/`DB-03`; W11 = `SUM-03`/`SUM-04`; W12 = `RUN-02`; W13 = `RUN-07`; W14 = `DB-14`/`SUM-04`; W15 = `CAB-09`/`CAB-10`; W16 = `RUN-08`; W17 = `RUN-13`; W18 = `RUN-16`.
+
+**Mapping to Appendix B:** every row of B.1 is covered by `CFB-*`, `DB-*` and `SUM-*`; B.2 by `CAB-*`; B.3 by `RUN-02`, `RUN-07`, `RUN-08`, `RUN-12`, `RUN-14`, `RUN-15`; B.4 by `RUN-05`, `RUN-09`, `RUN-13`, `RUN-17`, `RUN-18`; B.5 by `RUN-10` and `RUN-16`. A pitfall whose check is only **static** has no case here on purpose: it is caught before Windows runs.
+
+### Evidence guidelines and references
+
+Document native error codes as numeric values. For `MsiOpenDatabaseW` tests use an explicit read-only or transacted mode, close handles, and keep database-read and installation conclusions separate. For invalid samples, prefer API-level tests before any `msiexec` execution. If a case needs unsupported Windows releases, multi-GiB media, Arm64 guests or unavailable fixture sources, record **Blocked** with the exact missing prerequisite rather than guessing.
+
+- [MsiOpenDatabaseW](https://learn.microsoft.com/en-us/windows/win32/api/msiquery/nf-msiquery-msiopendatabasew) (opening modes); [MsiGetFileHashW](https://learn.microsoft.com/en-us/windows/win32/api/msi/nf-msi-msigetfilehashw) (native 128-bit file hash); [Template Summary](https://learn.microsoft.com/en-us/windows/win32/msi/template-summary) (language and platform syntax); [Windows Installer initialization errors](https://learn.microsoft.com/en-us/windows/win32/msi/initialization-errors) (native installer statuses).
+- Cross-reference the exact [WiX](https://github.com/wixtoolset/wix) and [GNOME msitools](https://github.com/GNOME/msitools) versions used; a difference between toolchains is not automatically a Windows Installer format requirement.
