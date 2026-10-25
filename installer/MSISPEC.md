@@ -25,8 +25,9 @@ As of 2026-10-25.
 - [13. WiX v4 and later](#13-wix-v4-and-later)
 - [14. Conformance and verification](#14-conformance-and-verification)
 - [15. Test vectors and verification](#15-test-vectors-and-verification)
-- [16. Field reports from msitools](#16-field-reports-from-msitools)
-- [17. Full specification](#17-full-specification)
+- [16. Independent implementation comparison](#16-independent-implementation-comparison)
+- [17. The engine without custom-action code](#17-the-engine-without-custom-action-code)
+- [18. Reference chapters](#18-reference-chapters)
 
 ## Purpose and scope
 
@@ -47,6 +48,7 @@ This is a language- and tool-independent reference for reading, writing, validat
 - **Reported:** described in a third-party issue, log or commit but not independently reproduced.
 - **Unverified:** needs a repeatable native compatibility test.
 - **Recommended:** an optional interoperable or deterministic output profile, not a Windows Installer mandate.
+- **Source (WiX / msitools):** read in that producer's source code at a pinned commit (section 17.6); describes the producer and the engine facts its authors relied on, not a universal requirement.
 
 MUST, SHOULD and MAY use RFC 2119 terminology only within the declared scope of a rule. Successful parsing, successful native API opening and successful installation are distinct conformance levels. A reference writer's deterministic bytes do not define the only valid encoding.
 
@@ -55,6 +57,7 @@ MUST, SHOULD and MAY use RFC 2119 terminology only within the declared scope of 
 - [Microsoft Windows Installer](https://learn.microsoft.com/en-us/windows/win32/msi/windows-installer-portal), [MS-CFB](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/) and [MS-OLEPS](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-oleps/).
 - [GNOME msitools](https://github.com/GNOME/msitools): portable MSI database reading/writing through libmsi, based on a subset of Wine's implementation.
 - [WiX Toolset](https://github.com/wixtoolset/wix): producer-specific MSI authoring, binding, validation and native MSI database interoperability.
+- Source reading: WiX at commit 53215fc (2026-10-24, MS-RL) and msitools at 8deb133 (2026-10-24, LGPL-2.1 / GPL-2.0) were read for behaviour, not copied; section 17.6 lists the files and such statements carry **(source)**.
 - Native Windows msi.dll, msiexec.exe and cabinet.dll: investigation targets; identifying exports does not prove internal algorithms.
 
 Earlier reference hashes and toolchain output comparisons are retained as historical evidence, but should not be promoted to universal requirements without identifying sample hashes, versions and reproduction steps.
@@ -181,7 +184,7 @@ Every string in every table is stored as a string ID; ID 0 is NULL. `_StringPool
 - The long entry is exactly `0, refcount, low16(length), high16(length)` as u16 words. One open-source writer emitted `0, high16(length), low16(length), refcount` instead, and its packages with a string over 65535 bytes do not load (reported). A license RTF above 64 KiB is enough to need a long entry; a test vector MUST cover one.
 - No empty strings (empty equals NULL) and no duplicates. Canonical writers SHOULD leave no free slots. Readers MUST accept them: WiX-built packages have free slots (reported), so a string added later can get an ID below existing keys.
 - A refcount MUST equal the stored references in all table streams, `_Tables` and `_Columns` included (observed exact in native output). Fail above 65535.
-- IDs are 2 bytes, or 3 (u16 low, u8 high) with the flag. Writers set it when the highest ID is ≥ 65535; readers MUST honour it.
+- IDs are 2 bytes, or 3 (u16 low, u8 high) with the flag. Writers set it when the highest ID is ≥ 65535; readers MUST honour it. libmsi, whose code descends from Wine's, sets it once its ID count exceeds 65535 and reads it from bit 15 of the second u16 (source); the engine's exact threshold stays unverified.
 - Code page 0 allows ASCII only; otherwise use an ANSI code page or 65001, which a WiX 5-built package used (observed). Never 1200/1201; fail rather than substitute `?`.
 
 ### Columns and tables
@@ -199,13 +202,13 @@ String words: `sN` 0x0D00 + N, `SN` 0x1D00 + N, `lN` 0x0F00 + N, `LN` 0x1F00 + N
 - Readers test in order: `(t & ~0x1000) == 0x0900` binary, `t & 0x0800` string, low byte 4 int32, 1 or 2 int16, else reject. Widths: string 2 or 3, int16 2, int32 4, binary 2.
 - `_Tables` (`Name`, string key) lists every persistent table, `_Validation` and empty tables included. It omits itself, `_Columns`, the pool, `_Streams` and `_Storages`.
 - `_Columns` has the implicit schema `Table` (string key), `Number` (int16 key, 1-based), `Name` (string), `Type` (int16).
-- Per table: `Number` 1..n contiguous, keys first in key order, at least one key, at most one binary column, SHOULD be ≤ 32 columns.
+- Per table: `Number` 1..n contiguous, keys first in key order, at least one key, at most one binary column, and at most 32 columns: that is the engine's limit, and WiX refuses to write a real table with more (source). Table names are at most 31 characters.
 - A table with rows has one stream under its encoded name. An empty table has no stream (observed); readers treat it as empty.
 - Stream length MUST be a multiple of `rowSize`. Layout is column-major: `offset(c, r) = rowCount × Σ width(1..c−1) + r × width(c)`.
 - Rows MUST be sorted ascending by key columns, comparing stored values: string IDs, and biased integers as unsigned (observed in all native tables). The engine needs it: a `Property` table with one row out of order fails to open with error 2211, so the install fails with 1605 for lack of a `ProductCode` (reported). A NULL key column (0) sorts first, as in multi-row `Upgrade` tables.
 - Any edit of an existing package re-sorts every table it touches after assigning string IDs, because a new string's ID can fall anywhere in the order.
 - 0 is NULL for every kind and MUST NOT appear in non-nullable columns. int16 stores `(v + 0x8000) & 0xFFFF` (−32767…32767); int32 stores `v XOR 0x80000000` (±2147483647). So `Media.DiskId = 1` is `01 80` and `LastSequence = 3` is `03 00 00 80`.
-- A binary column stores 1; its bytes live in stream `Table.Key1[.Key2…]` (integer keys in signed decimal), e.g. `Icon.app.ico`. Write one per non-NULL value.
+- A binary column stores 1; its bytes live in stream `Table.Key1[.Key2…]` (integer keys in signed decimal), e.g. `Icon.app.ico`. Write one per non-NULL value. The decoded name is limited to 62 characters (source: the `msi.dll` limit WiX checks before writing a stream), which is the 31-unit encoded limit for names made of alphabet characters.
 
 Canonical writer:
 
@@ -215,11 +218,27 @@ Canonical writer:
 4. Serialize `_StringPool`, `_StringData`, `_Tables`, `_Columns`, each non-empty table and each binary stream.
 5. Add summary information, cabinets and sub-storages; build the CFB (section 2); sign last. Identical inputs MUST give identical bytes.
 
+### Text archives and transforms (informative)
+
+Both toolchains write a database through `msi.dll` or libmsi by importing one text archive (`.idt`) per table (source). A writer that emits streams directly SHOULD still read and write the same archives, because every other MSI tool does.
+
+- An archive is CRLF lines of tab-separated fields: the column names, then the `.idt` types of section 6.1 (`s72`, `I2`, …), then the table name followed by its key columns, then one line per row. Column names and types are 32 characters at most.
+- In a value, a tab is stored as 0x10, CR as 0x11 and LF as 0x19; libmsi turns the pair 0x11 0x19 back into CRLF and an embedded NUL into LF (source). Non-ASCII text is in the database code page; a UTF-8 archive has no byte-order mark.
+- The pseudo table `_ForceCodepage` sets the database code page: two empty lines, then `<codepage>\t_ForceCodepage`. It MUST be imported before any table, or the tables are stored in the wrong code page (source).
+- The pseudo table `_SummaryInformation` has columns `PropertyId i2` and `Value l255`; times are written as `yyyy/mm/dd hh:mm:ss`.
+- Binary columns name a file in the archive's directory; WiX imports those rows through records instead, because `msi.dll` copies the files otherwise (source).
+
+A transform (`.mst`) is a compound file with CLSID `{000C1082-…}` whose table streams hold rows to insert, change or delete, plus its own `_StringPool` and `_StringData` (source: libmsi's reader; informative, as a producer of plain packages writes no transforms):
+
+1. Each record starts with a u16 mask. If bit 0 is set, the high byte is a column count and that many columns follow in order: a row to insert, or a full replacement when the keys match.
+2. Otherwise the key columns are always present and each other bit *i* marks column *i* as present: a partial update. A mask of 0 carries only the keys and deletes the row.
+3. String columns are string IDs of the transform's own pool, in the width its pool header selects. `_Tables` and `_Columns` streams are applied first; in `_Columns`, the engine writes NULL into `Number` for the columns of a new table, and the reader numbers them 1, 2, … per table.
+
 Unverified:
 
 - Native storage of refcounts above 65535, and its long-reference threshold (65535 or 65536).
-- The oldest engine accepting a UTF-8 database code page (the observed package needs 5.0), and the native column limit (32 assumed).
-- Transform encoding of dropped tables, columns and wide masks; `MergeModule.CABinet` as a plain `_Streams` entry. (Sorted rows are required: section 16.)
+- The oldest engine accepting a UTF-8 database code page (the observed package needs 5.0).
+- Transform encoding of dropped tables, columns and wide masks; `MergeModule.CABinet` as a plain `_Streams` entry. (Sorted rows are required: "Columns and tables" above.)
 
 ## 4. Summary information
 
@@ -227,7 +246,7 @@ Unverified:
 
 | Stream offset | Field | Writer value |
 |---|---|---|
-| 0x00 / 0x02 / 0x04 | ByteOrder / Version / SystemIdentifier | 0xFFFE / 0 / 0x00020006 (constant) |
+| 0x00 / 0x02 / 0x04 | ByteOrder / Version / SystemIdentifier | 0xFFFE / 0 / 0x00020006 (constant; msitools writes 0x00020005 and its packages install, so the engine ignores the field, source) |
 | 0x08 / 0x18 | CLSID / NumPropertySets | zero / 1 |
 | 0x1C / 0x2C | FMTID / Offset0 | `{F29F85E0-4FF9-1068-AB91-08002B27B3D9}` = `E0 85 9F F2 F9 4F 68 10 AB 91 08 00 2B 27 B3 D9` / 0x30 |
 | 0x30 | Section: Size, N, N × (PID u32, offset u32), values | offsets relative to 0x30, multiples of 4 |
@@ -239,7 +258,8 @@ Unverified:
 - PID 1 (VT_I2) MUST be present and is read as unsigned (0xFDE9 = 65001). Readers treat VT_EMPTY and VT_NULL as absent.
 - Readers check every value's VT against the PID table below and its byte count against the section size before copying. Crafted packages with a VT_LPSTR count of 0xFFFFFFFF, or a string where a FILETIME belongs, crashed one reader (reported).
 - FILETIME is UTC. A text form such as `.idt`'s `yyyy/mm/dd hh:mm:ss` MUST state its zone or use UTC; converting through local time shifts the value by an hour across daylight saving (reported).
-- Writers MUST use an ANSI code page (874, 932, 936, 949, 950, 1250–1258): the database code page when it is one, else 1252.
+- Writers MUST use an ANSI code page (874, 932, 936, 949, 950, 1250–1258): the database code page when it is one, else 1252. The reason 65001 is out: the engine reads the summary code page as a 16-bit signed value and cannot open a database whose value exceeds 32767 (source: WiX rejects such values with that explanation).
+- Toolchains fill in what the author left out: a random package code, Created and Last Saved set to the build time, Creating Application set to the producer's name, and the product language appended to a Template that has none (source).
 
 | PID | Name | VT | Package value |
 |---|---|---|---|
@@ -263,7 +283,7 @@ Test vector (chapter 03 §9): an x64 package with 14 properties, code page 1252,
 
 Unverified:
 
-- Acceptance of summary code page 65001 or 1200 and of VT_LPWSTR; minimum Page Count for `Arm`; case of platform tokens.
+- Acceptance of summary code page 1200 and of VT_LPWSTR (65001 fails: above); minimum Page Count for `Arm`; case of platform tokens.
 - Page Count for versions 1.0–1.2 and 4.0, and for values below 100; patch Word Count above 5.
 - Transform and patch formats (Revision Number spacing, `:` in transform lists, absent Word or Page Count, platform flag 0x0004); merge-module GUID format.
 
@@ -323,6 +343,10 @@ Each `ab` is `43 4B` ("CK") plus a raw RFC 1951 stream. Its last block has BFINA
 - Word Count 0x2 makes cabinets the default; `File.Attributes` 0x4000 or 0x2000 overrides it per file. In a compressed package, uncompressed files must sit at the source root.
 - To mix a cabinet with an uncompressed tree, clear 0x2 and mark cabinet files 0x4000. Never set both bits.
 - Use one folder per cabinet, splitting only at 0x7FFF8000 bytes. Split cabinets only at file boundaries.
+- Limits (source: WiX's cabinet code and its checks): a cabinet is at most 0x7FFFFFFF bytes, the FCI default that WiX keeps, with a folder threshold 16 bytes below it "to make cabbing of uncompressed data larger than 2 GB work"; `cFiles` is a u16, so a cabinet holds at most 65535 files and FCI fails above that; a cabinet or `.msi` over 2 GB is not installable. The 2 GB limit is on the whole `.msi`: a package whose embedded cabinets add up to more fails with "The system cannot open the device or file specified" even when they are several, while the same cabinets work beside the `.msi` (reported, WiX issue 8601).
+- A cabinet set that continues a file across cabinets needs consecutive `DiskId` values, in order, or the engine fails with error 2350, "FDI server error" (source). A producer need never write such sets.
+- "Smart cabbing" (source): WiX adds a second copy of identical content as an empty entry, flushes the folder first, and then patches the cabinet header so the duplicate's `cbFile`, `uoffFolderStart` and `iFolder` equal the original's while its own date, time and attributes stay. Files count as identical when their sizes and `MsiFileHash` values match. Readers MUST accept such entries (section 5 above); a writer that does this MUST keep the two files' own metadata.
+- WiX stores each file's last-write time converted to local DOS time, falls back to the creation time, and then to 1980-01-01 (source). A package built that way differs between time zones; the UTC rule above avoids that.
 
 ### Determinism and test vectors
 
@@ -401,7 +425,7 @@ Validators (ICE03, ICE06, ICE32) read `_Validation`, the installer does not, and
 
 ### Unverified (chapter 05)
 
-- Whether 32 columns per table is a hard engine limit; the syntax of `KeyFormatted` and `URL`.
+- The syntax of `KeyFormatted` and `URL`. (32 columns is the engine limit: section 3.)
 - Whether the toolchain writes `Patch.Sequence` as `i4` (no sample).
 - What to write when an `MsiFileHash` word is 0x80000000 (default: omit the row).
 - Handling of malformed registry `#` values (builders SHOULD reject them).
@@ -438,7 +462,11 @@ The internal UI is pure data: UI-sequence rows open dialogs, dialogs hold contro
 - Put every non-static control in the ring, including PathEdit and SelectionTree; leaving one out makes it a dead end for the keyboard. Static types are Billboard, Bitmap, GroupBox, Icon, Line, ProgressBar, Text and VolumeCostList. `Control_First` is the first control that takes focus, not the first control drawn.
 - Every `UIText` key a control or the installer uses MUST exist; otherwise the dialog shows "… is missing from the UIText Table" (reported).
 - Active controls (Edit, PathEdit, CheckBox, RadioButtonGroup, ListBox, SelectionTree, …) need a `Property` (error 2819). Bind public properties; make secure the ones the server needs.
-- Write `0` as `ControlEvent.Argument` for events without one. Write condition `1` for "always"; toolchain packages never leave it blank (observed).
+- Write `0` as `ControlEvent.Argument` for events without one. Write condition `1` for "always"; toolchain packages never leave it blank (observed), and WiX substitutes `1` for an empty condition (source).
+- A control event that sets a property clears it with the argument `{}` (source: the WixUI dialogs switch `ALLUSERS` between `{}` and `1` this way). It is the only way a dialog can unset a property.
+- On a dialog with TrackDiskSpace, a Text control whose text is exactly `[Property]` and not FormatSize needs a trailing space; WiX appends one and the comment calls it a Windows Installer quirk (source). Emit the space in that case.
+- A package with no components never gets `CostingComplete` set, so a "please wait for costing" page waits forever (reported, WiX issue 1790). Packages without components SHOULD skip that page or get a dummy component.
+- The Restart Manager page (`MsiRMFilesInUse`) is a dialog with a ListBox bound to `FileInUseProcess`, a radio group on a property, and an OK button that publishes `RMShutdownAndRestart` with argument `0` under the condition that the property says so, then `EndDialog Return` (source). It is shown when the engine finds files in use and `MSIRESTARTMANAGERCONTROL` has not disabled Restart Manager.
 - A style tag MUST start the text; otherwise `DefaultUIFont` applies. ScrollableText holds raw RTF and is never formatted.
 - Dialog bits: Visible 1, Modal 2, Minimize 4, SysModal 8, KeepModeless 16, TrackDiskSpace 32. Then UseCustomPalette 64, RTLRO 128, RightAligned 256, LeftScroll 512, Error 65536 (mask 0x000103FF). Seen values: 7 and 3 for pages, 5 for progress, 23 for files in use, 39 for feature selection, 65543 for errors (observed).
 - Control bits: Visible 1, Enabled 2, Sunken 4, Indirect 8, Integer 16, RTLRO 32, RightAligned 64, LeftScroll 128. Bits from 0x10000 up differ per type, such as NoPrefix 0x20000 on Text.
@@ -487,7 +515,7 @@ The error dialog needs the Error bit and a Text control `ErrorText` as `Control_
 ### Unverified (chapter 06)
 
 - The pixel size of installer units and the centering formula.
-- The meaning of a blank `ControlEvent.Condition`, and whether transitions wait for later events.
+- Whether the engine treats a blank `ControlEvent.Condition` as true (toolchains never emit one), and whether transitions wait for later events.
 - `Enable` vs `Enabled` as the attribute name (emit `Enabled`).
 - Case of `ALL` in feature events: toolchain packages use `All` (observed); emit `ALL`.
 - The per-type bit masks ICE45 really uses, and UIText `Bytes` vs `bytes` (emit both).
@@ -516,7 +544,9 @@ Static package validation and Windows runtime tests verify different properties.
 - Per-user packages MUST pass ICE105: no no-impersonate deferred actions, `SystemFolder`-type Directory keys, GAC assemblies, ODBCDataSource, ServiceInstall or HKLM rows.
 - Platform `x64` or `Intel64` needs Page Count ≥ 200, `Arm64` ≥ 500. Component bit 256 does not move files: on 64-bit Windows `ProgramFilesFolder` is `C:\Program Files (x86)\`, so use `ProgramFiles64Folder` explicitly (ICE80).
 - `Arm64` packages need bit 256 like `x64`: without it their files and registry values land in the 32-bit views (reported). An `x64` package also installs on Arm64 Windows, which runs x64 code under emulation (reported).
-- `ProgramFiles6432Folder` is a WiX v4 alias, not a Windows Installer property. A WiX-aware producer resolves such aliases to `ProgramFilesFolder` or `ProgramFiles64Folder` from the platform and never emits them as Directory keys; otherwise the folder is created literally under `TARGETDIR`.
+- `ProgramFiles6432Folder` is a WiX v4 alias, not a Windows Installer property. A WiX-aware producer resolves such aliases to `ProgramFilesFolder` or `ProgramFiles64Folder` from the platform and never emits them as Directory keys; otherwise the folder is created literally under `TARGETDIR`. WiX resolves the three aliases `ProgramFiles6432Folder`, `CommonFiles6432Folder` and `System6432Folder` to the 32-bit name on x86 and the 64-bit name otherwise (source).
+- A dual-scope package decides at run time from `ALLUSERS` and `Privileged` (source: WixUI_Advanced): type-51 actions before CostFinalize compute a per-user folder (`[LocalAppDataFolder]Apps\<name>`) and a per-machine one (`[ProgramFilesFolder]<name>` or the 64-bit folder), and the install folder takes the per-user value when `ALLUSERS=""` or `ALLUSERS=2 AND NOT Privileged`, and the per-machine value when `ALLUSERS=1` or `ALLUSERS=2 AND Privileged`. A scope page then sets `ALLUSERS` to `{}` or `1` and the folder property through control events.
+- Per-user rollback is incomplete (reported, WiX issue 8574, open): when a deferred action fails after `PublishProduct`, the rollback of `PublishProduct` cannot delete the `HKU\<SID>\Software\Microsoft\Installer\Products\…\SourceList` values (errors 1402, 1403), so the product stays in Apps & features while nothing is installed, and uninstall, repair and upgrade all fail until the registry is cleaned by hand. Schedule deferred actions that can fail before `RegisterProduct`, right after `InstallInitialize` or `InstallFiles`.
 
 ### 8.3 Directory resolution (CostFinalize)
 
@@ -542,7 +572,7 @@ The component code is machine-wide: one GUID is one component in every package. 
 - A first install selects a feature when 0 < Level ≤ `INSTALLLEVEL` (default 1); Level 0 disables it, even against `ADDLOCAL=ALL`. The Condition table changes Level, unless `Preselected` is 1.
 - Attributes: FavorLocal 0, FavorSource 1, FollowParent 2, FavorAdvertise 4, DisallowAdvertise 8, UIDisallowAbsent 16, NoUnsupportedAdvertise 32. Reject 4+8, 32+8 and 2+1.
 - Requests apply in the order `ADDLOCAL`, `REMOVE`, `ADDSOURCE`, `ADDDEFAULT`, `REINSTALL`, `ADVERTISE`, `COMPADD*`, `FILEADD*`. Any of them sets `Preselected`; never author them in the Property table.
-- Limits: key ≤ 38 characters, depth ≤ 16, 1600 components per feature on legacy systems. Only warn: real packages exceed it (observed).
+- Limits: key ≤ 38 characters, depth ≤ 16, 1600 components per feature on legacy systems. Only warn: real packages exceed it (observed). WiX refuses a package with more than 65536 components or a feature deeper than 16 (source).
 
 ### 8.6 File versioning
 
@@ -551,7 +581,8 @@ The component code is machine-wide: one GUID is one component in every package. 
 3. Both unversioned: skip if `MsiFileHash` matches. Keep B if it was modified after creation; otherwise install A.
 
 - The key file is decided first. The installer trusts the authored `File.Version` and `File.Language`, so copy them from the version resource. An MSI that leaves `Version` empty for an executable makes it unversioned, and an upgrade then keeps the old binary with "Disallowing installation of component … since the same component with higher versioned keyfile exists" (reported).
-- Unversioned files get no version; fonts get a null Language. A companion file (Version = another File key) follows its parent and is never a key path.
+- Unversioned files get no version; fonts get a null Language. A companion file (Version = another File key) follows its parent and is never a key path. WiX reads version and language with `MsiGetFileVersion`, the engine's own routine, lets the file's values win over authored ones, treats an authored `Version` that is not another File key as a companion-file mistake, and hashes only files that report no version (source).
+- Version checks on files under `SystemFolder` are unreliable on Windows 10 and later: `msiexec` is not manifested for those versions, so the version API returns the compatibility-shimmed numbers for OS files (reported, WiX issue 5824). Do not gate on the version of an OS DLL; test a registry value or `VersionNT`/`WindowsBuild` instead.
 - `REINSTALLMODE` (default `omus`): `p` missing, `o` older, `e` equal or older, `d` different, `a` all, `c` checksum. Then `u` user registry, `m` machine registry, `s` shortcuts, `v` re-cache the package.
 
 ### 8.7 Properties
@@ -564,6 +595,10 @@ The component code is machine-wide: one GUID is one component in every package. 
 | Hidden | Listed in `MsiHiddenProperties`; values are not logged. |
 
 Precedence, high to low: OS-set values, command line, AdminProperties, transforms, Property table. Values are never empty and never formatted. Required: `ProductCode`, `ProductLanguage` (listed in Template), `Manufacturer`, `ProductName` (≤ 63 characters), `ProductVersion`.
+
+- `SecureCustomProperties`, `AdminProperties` and `MsiHiddenProperties` are `;`-joined sorted sets. `MsiHiddenProperties` also lists the names of deferred, rollback and commit actions marked HideTarget, because their `CustomActionData` arrives as a property of that name (source).
+- A raw registry search (`RegLocator.Type` 2) of a `REG_MULTI_SZ` value gives a property that begins and ends with a NUL. In a public property that value breaks the client-to-server hand-off, so later dialogs misbehave and the UI cannot uninstall (reported, WiX issue 1108). Search multi-strings only into private properties, or not at all.
+- A property set to `*` for `ProductCode` means "generate": toolchains replace it with a random GUID at build time (source); section 11.1 has a reproducible alternative.
 
 ### 8.8 Condition grammar
 
@@ -613,6 +648,16 @@ Prefer A or B. Minor upgrades install with `msiexec /i new.msi REINSTALL=ALL REI
 - Deferred actions run as the user. No-impersonate (2048) runs them as LocalSystem in elevated installs; per-user packages MUST NOT use it.
 - A deferred action sees only `CustomActionData`, `ProductCode` and `UserSID`. To pass data, a type 51 action sequenced before it sets a property named like the deferred action.
 - On failure the rollback script restores the machine. Sequence a rollback action (1280) before the action it undoes; commit actions (1536) run after success. With `RollbackDisabled`, neither runs.
+
+What the engine gives a custom action, as WiX's helper library uses it (source):
+
+- A deferred, rollback or commit action has no database: `MsiGetActiveDatabase` returns nothing, and only `CustomActionData`, `ProductCode` and `UserSID` are readable. An immediate action reads tables through views on the active database.
+- To hand data to a deferred action, an immediate action sets a property with the deferred action's name and then calls `MsiDoAction` on it; the engine copies the value into the script at that moment. A library alternative to the type-51 row of section 8.11.
+- Progress: a deferred action first sends `INSTALLMESSAGE_PROGRESS` with fields `1, 1, 0` to switch to explicit mode, then `2, ticks, 0` to advance; only an immediate action may extend the bar with `3, ticks, 0`. A return of `IDCANCEL` or `IDABORT` from any `MsiProcessMessage` means the user cancelled, and the action MUST return 1602.
+- Return codes: 0 success, 1602 user exit, 1603 failure, and 259 (`ERROR_NO_MORE_ITEMS`) ends the whole install as a success without running later actions. WiX ships a one-line action returning 259 for packages that must silently succeed when a newer version is already installed, conditioned on the upgrade-detection property after FindRelatedProducts (source).
+- A reboot is requested with `MsiSetMode(MSIRUNMODE_REBOOTATEND)` from an immediate action. A deferred action cannot set it directly, so it leaves a marker that an immediate action after InstallFinalize reads (source: `WixCheckRebootRequired`).
+- The engine preserves no DLL state between calls, so every action starts from scratch (source). `MsiViewModify` with `INSERT_TEMPORARY` reports only `ERROR_FUNCTION_FAILED`; `VALIDATE_NEW` on the same record gives the detailed `MSIDBERROR` (source).
+- Type-51 property setting cannot be deferred: the engine rejects it, and WiX does too with "MSI doesn't support in-script property setting" (source). TS-aware actions MUST be deferred; async-no-wait is only for EXE actions (source).
 
 ### 8.12 Package consistency checklist (full list: chapter 07 §13)
 
@@ -673,9 +718,9 @@ Numbers are Microsoft's suggested ones; where the reference toolchain differs, t
 | RegisterUser, RegisterProduct, PublishFeatures, PublishProduct | 6000, 6100, 6300, 6400 | — | Always (ICE82 group) |
 | InstallFinalize | 6600 | — | Always |
 
-- Admin tables, always: AUS has the costing actions and ExecuteAction 1300. AES has costing, InstallValidate 1400, InstallInitialize 1500, InstallAdminPackage 3900, InstallFiles 4000 and InstallFinalize 6600.
+- Admin tables, always: AUS has the costing actions and ExecuteAction 1300. AES has costing, InstallValidate 1400, InstallInitialize 1500, InstallAdminPackage 3900, InstallFiles 4000 and InstallFinalize 6600. WiX also knows LaunchConditions 100 and PatchFiles 4090 in AES and LaunchConditions 100 in AUS (source).
+- The complete WiX table for IES (source), where Microsoft gives no number or a different one: IsolateComponents 950, SetODBCFolders 1100, AllocateRegistrySpace 1550, UnpublishComponents 1700, MsiUnpublishAssemblies 1750, UnregisterComPlus 2100, SelfUnregModules 2200, UnregisterTypeLibraries 2300, RemoveODBC 2400, UnregisterFonts 2500, UnregisterClassInfo 2700, UnregisterExtensionInfo 2800, UnregisterProgIdInfo 2900, UnregisterMIMEInfo 3000, RemoveDuplicateFiles 3400, MoveFiles 3800, PatchFiles 4090, RegisterFonts 5300, InstallODBC 5400, RegisterTypeLibraries 5500, SelfRegModules 5600, RegisterComPlus 5700, MsiConfigureServices 5850 with condition `VersionNT>=600`, PublishComponents 6200, MsiPublishAssemblies 6250, InstallExecute 6500 and InstallExecuteAgain 6550 with condition `NOT Installed`. msitools uses the same numbers and adds `NOT Installed` to AllocateRegistrySpace (source). ResolveSource 1050, ForceReboot 6450 and ScheduleReboot 6610 have no WiX number and stay non-normative suggestions.
 - AdvtES, always: CostInitialize 800, CostFinalize 1000, InstallValidate 1400, InstallInitialize 1500, PublishFeatures 6300, PublishProduct 6400 (ICE96), InstallFinalize 6600. Its tables may add CreateShortcuts 4500, Register…Info 4600–4900, PublishComponents 6200 and MsiPublishAssemblies 6250; nothing else is allowed.
-- Suggested sequence numbers where Microsoft gives no number (non-normative): IsolateComponents 950, ResolveSource 1050, MsiConfigureServices 5850, ForceReboot 6450, InstallExecute 6500, ScheduleReboot 6610. Other numbers: chapter 08 §3.
 - RemoveExistingProducts (REP) follows FindRelatedProducts in one of four windows (ICE63). Window 1: between InstallValidate and InstallInitialize (WiX 1401). Window 2: right after InstallInitialize, before any script action (WiX 1501).
 - Window 3: right after InstallExecute(Again) (6550). Window 4: after InstallFinalize (WiX 6601, tutorial 6700).
 - Window 1 removes the old product first and copies reused files again. If removal fails, window 3 rolls back both products and window 4 only the removal.
@@ -701,6 +746,8 @@ For each table with at least one row, emit the forward and the reverse action:
 | `Font`, `SelfReg`, `TypeLib`, `Complus` | RegisterFonts, SelfRegModules, RegisterTypeLibraries, RegisterComPlus | the matching Unregister… action | IES |
 | `ODBC*`, `BindImage`, `IsolatedComponent`, `Patch` | InstallODBC + SetODBCFolders, BindImage, IsolateComponents (IUS too), PatchFiles | RemoveODBC | IES |
 | `LockPermissions`, `MsiLockPermissionsEx`, `ReserveCost`, `MsiFileHash`, `Media`, `Icon` | none of their own | — | — |
+
+Refinements from WiX's own table-to-action rules (source): any `Component` row at all brings CreateFolders and RemoveFolders; `Registry` or `RemoveRegistry` rows bring both WriteRegistryValues and RemoveRegistryValues; `DuplicateFile` rows require InstallFiles even without `File` rows; `Font` rows come from files with a font title, `SelfReg` and `BindImage` from file flags; `Upgrade` rows add MigrateFeatureStates only when one of them migrates features; an `AppSearch` row ensures the `Signature` table, a `ProgId` row the `Extension` table, and a `Dialog` row the `ListBox` table, all possibly empty.
 
 Ordering checks after numbering (ICE27; full list in chapter 08 §2.3). Before/after numbering is in section 11.7.
 
@@ -744,7 +791,7 @@ Reference validation checks (profile-specific; chapter 08 §5.5, §5.10):
 - AdvtES accepts only types 19, 35 and 51 (ICE72). Type 35 follows CostFinalize; a type 51 that sets a directory precedes it (ICE12).
 - Immediate types 17, 18, 21 and 22 follow CostFinalize (ICE75), and InstallFinalize if the file is not yet installed. Nested installs are deprecated, conditioned and synchronous.
 - A deferred action `X` reads `CustomActionData` from a property `X`, usually set by a type-51 action before it. Common sums: deferred 1024, rollback 1280, commit 1536, elevated deferred 3072.
-- DLL return codes: 0 success, 1602 user exit, 1603 failure, 259 skip the rest. Any EXE exit code but 0 fails unless Continue is set.
+- DLL return codes: 0 success, 1602 user exit, 1603 failure, 259 ends the install successfully without the remaining actions (source: WiX relies on it, section 8.11). Any EXE exit code but 0 fails unless Continue is set.
 
 ### 9.5 ICE and consistency validation rules
 
@@ -763,7 +810,7 @@ Reference validation checks (profile-specific; chapter 08 §5.5, §5.10):
 - Run order of equal numbers; whether termination actions in execute tables run; a name that is both a custom action and a dialog.
 - ICE26's action lists are unpublished, so the minimal sets are derived. Unspecified sequence numbers are implementation choices.
 - Rollback behaviour of REP windows 1 and 2; which action evaluates `MsiFileHash` and which caches `Icon` entries.
-- Effect of DLL return codes other than 0, 1602 and 1603; values of `ERROR_INSTALL_REBOOT(_NOW)`; HideTarget on every base type.
+- Effect of DLL return codes other than 0, 259, 1602 and 1603; values of `ERROR_INSTALL_REBOOT(_NOW)`; HideTarget on every base type.
 
 ## 10. WiX v3 authoring model
 
@@ -790,7 +837,7 @@ Each WiX concept produces a fixed set of rows; these are WiX authoring concepts 
 | Component | `Component(Component, ComponentId, Directory_, Attributes, Condition, KeyPath)` | GUID default "generate" (section 11.4); empty → NULL, unmanaged. Attributes: local 0 / source 1 / either 2, SharedDllRefCount 8, Permanent 16, Transitive 64, NeverOverwrite 128, 64-bit 256, DisableRegistryReflection 512, UninstallWhenSuperseded 1024, Shared 2048, registry key path 4, ODBC key path 32. |
 | File | `File(File, Component_, FileName, FileSize, Version, Language, Attributes, Sequence)`; `MsiFileHash` if unversioned; optional `SelfReg`, `BindImage`, `Font`, `MsiAssembly`, `MsiAssemblyName` | Key defaults to the filename. Attributes 512 (Vital). Companion file: `Version` = its key, `Language` NULL. |
 | Feature | `Feature`; one `Condition(Feature_, Level, Condition)` per condition | Level 1. Display collapse = 2k for the k-th visible feature (observed 2, 4, 6, 8), expand 2k−1, hidden 0. Attributes FavorSource 1, FollowParent 2, FavorAdvertise 4, DisallowAdvertise 8, UIDisallowAbsent 16, NoUnsupportedAdvertise 32 (observed 24). Key ≤ 38 chars. |
-| Registry key / value | `Registry(Registry, Root, Key, Name, Value, Component_)`; removals → `RemoveRegistry` | Root HKMU −1, HKCR 0, HKCU 1, HKLM 2, HKU 3. Integer `#n` (observed `#1`), expandable `#%…`, binary `#x…`, leading `#` in a string doubled, empty string → NULL (observed). Multi-string joined by `[~]`: append `[~]…`, prepend `…[~]`. Key create `+`, delete on uninstall `-`, both `*`; remove on install → `RemoveRegistry` `-`. |
+| Registry key / value | `Registry(Registry, Root, Key, Name, Value, Component_)`; removals → `RemoveRegistry` | Root HKMU −1, HKCR 0, HKCU 1, HKLM 2, HKU 3. Integer `#n` (observed `#1`), expandable `#%…`, binary `#x…`, leading `#` in a string doubled, empty string → NULL (observed). Multi-string: write `[~]a[~]b[~]` (a value without `[~]` is wrapped in them), append `[~]…`, prepend `…[~]` (source). Key create `+`, delete on uninstall `-`, both `*`; remove on install → `RemoveRegistry` `-`; remove on uninstall → a `Registry` row with NULL `Value` (source). |
 | Environment | `Environment(Environment, Name, Value, Component_)` | Forms in section 11.9. |
 | Shortcut | `Shortcut`; one `MsiShortcutProperty` per shell property | Target `[#FileKey]` under a file (observed), else authored or `[DirKey]`. Advertised → primary feature. Show normal 1, maximized 3, minimized 7. |
 | ServiceInstall | `ServiceInstall` | Key defaults to the name. Type own 16, shared 32, +256 interactive. Start auto 2, demand 3, disabled 4. ErrorControl ignore 0, normal 1, critical 3, +32768 vital. Dependencies `Svc[~]+Group[~][~]`. |
@@ -826,7 +873,7 @@ Full detail: chapter 09 §9.2–§9.19.
 - Properties: `ErrorDialog`, `DefaultUIFont`, `WixUIRMOption=UseRM` (observed), `ARPNOMODIFY=1` without feature selection (observed). The editable folder property (WiX: `WIXUI_INSTALLDIR`) names a public directory key.
 - No DLLs: path checks use `SetTargetPath` then `CheckTargetPath`; printing uses `MsiPrint`. Dialog layout and text are package-specific; keys reuse WiX names (`WelcomeDlg`, `InstallDirDlg`, `Next`, `Back`).
 - WiX utility features done natively: event-log sources as `Registry` rows, `.url` files as `IniFile` rows, SDDL via `MsiLockPermissionsEx`, service settings via `MsiServiceConfig`. WiX's type-65 environment-broadcast action (observed) is not needed.
-- `MsiServiceConfig` works for delayed auto start (ConfigType 3) and the failure-actions flag (4), with `MsiConfigureServices` at 5850, condition `VersionNT>=600` (reported, Windows Server 2025). `MsiServiceConfigFailureActions` with a restart action failed there with error 1939 (Win32 error 5) and rolled back (reported). Until a Windows experiment shows otherwise, failure actions use a deferred, no-impersonate EXE action running `[SystemFolder]sc.exe failure …` (section 16).
+- `MsiServiceConfig` works for delayed auto start (ConfigType 3) and the failure-actions flag (4), with `MsiConfigureServices` at 5850, condition `VersionNT>=600` (reported, Windows Server 2025). `MsiServiceConfigFailureActions` with a restart action failed there with error 1939 (Win32 error 5) and rolled back (reported). WiX's tracker records the same: the restart and reboot actions of that table do not work, Microsoft's own documentation says the feature "is not working as expected", WiX warns about it at build time, and WiX's answer is a custom-action DLL calling `ChangeServiceConfig2` with the shutdown privilege enabled (reported, WiX issue 5964; source). Failure actions therefore use a deferred, no-impersonate EXE action running `[SystemFolder]sc.exe failure …` (section 17.3). In that table a NULL `RebootMessage` or `Command` is written as `[~]`, which means "leave unchanged" (source).
 - Event-log source: under `HKLM\SYSTEM\CurrentControlSet\Services\EventLog\<Log>\<Source>`, write `EventMessageFile`, optional `CategoryMessageFile` with `CategoryCount` and `ParameterMessageFile` (expandable strings, count `#n`), and `TypesSupported` (`#n`). `Security` is not a valid log.
 
 **Unverified (chapter 09):**
@@ -842,7 +889,7 @@ Full detail: chapter 09 §9.2–§9.19.
 
 At bind time WiX derives every value the author left out; any derived values described here are producer-specific, not universal on-disk requirements.
 
-Producer-specific differences: WiX's component GUIDs (D1), identifiers (D2) and short names (D3) come from internal hashes. A reference package may use MSZIP where WiX writes LZX (D4; observed v3: `high` → LZX, 2²¹ window). Validation strategy, bundled custom actions and PID 18 identity are producer-specific choices.
+Producer-specific differences: WiX's generated identifiers (D2) come from internal hashes. Its component GUIDs (D1) and short names (D3) are known algorithms (source), described in sections 11.3 and 11.4, so an independent producer can reproduce them and a product that moves away from WiX keeps its component GUIDs. A reference package may use MSZIP where WiX writes LZX (D4; observed v3: `high` → LZX, 2²¹ window; source: `low`, `medium` and `high` are LZX with 2¹⁵, 2¹⁸ and 2²¹ windows). Validation strategy, bundled custom actions and PID 18 identity are producer-specific choices.
 
 ### 11.1 Identity and summary information
 
@@ -895,8 +942,9 @@ A valid short name has 1–8 characters, optionally `.` and 1–3 more, with at 
 
 - `parentKey`: a file's component directory, a directory's parent, a shortcut's `Directory_`, or a `RemoveFile`/`IniFile` directory.
 - Scope: all names in the same directory, case-insensitive, including long names that are valid short names.
-- Observed shapes: `ab3x9_qz.go|averylongname.go`, `k2-fm0qw|Uninstall App`, `h7xq0d4m.dll|LongLibraryName.dll`; values differ (D3). `FileSearch` names never get one.
-- The example reference profile gives every standard folder a fixed, distinct 8.3 name, so administrative layouts cannot collide.
+- Observed shapes: `ab3x9_qz.go|averylongname.go`, `k2-fm0qw|Uninstall App`, `h7xq0d4m.dll|LongLibraryName.dll`. `FileSearch` names never get one.
+- WiX's algorithm (source), which a producer SHOULD use instead of steps 1–4 to reproduce WiX's names: `data = lower(longName) + "|" + arg₁ + "|" + arg₂ …` with the arguments `File` and the directory key for a file, `Directory` and the parent key for a directory, `Shortcut`, the component and the directory for a shortcut, and `RemoveFile`, `IniFile`, `MoveFile` or `CopyFile` plus their component (and file) keys. `short = base64(SHA-1(UTF-8(data)))[0:8]` with `+` → `-` and `/` → `_`, lower-cased, plus the long name's extension cut to a dot and 3 characters; the extension is dropped when the result is not a valid short name, and never added for directories. Two files hashing to one short name only produce a warning.
+- The example reference profile gives every standard folder a fixed, distinct 8.3 name, so administrative layouts cannot collide. WiX's names (source): `Admin`, `AppData`, `CommApp`, `CFiles`, `CFiles64`, `Desktop`, `Favs`, `Fonts`, `LocalApp`, `Pictures`, `NetHood`, `Personal`, `Programs` (PerUserProgramFilesFolder), `Printers`, `PFiles`, `PFiles64`, `PMenu`, `Recent`, `SendTo`, `StrtMenu`, `StartUp`, `System`, `System16`, `System64`, `Temp`, `Template`, `Windows`; the three `…6432Folder` aliases are `.`.
 - With Word Count bit 1 only short names are stored; each long name must be valid or have an explicit short name.
 
 ### 11.4 Key paths and component GUIDs
@@ -905,12 +953,13 @@ A valid short name has 1–8 characters, optionally `.` and 1–3 more, with at 
 2. Else the marked child: file, registry value (+0x4) or ODBC data source (+0x20). Two marked children are an error.
 3. Else the first file or registry value in definition order, else the directory. Automatically choosing a key path should be recorded as a producer decision.
 
-Bit 0x100 marks components of 64-bit packages (observed v3 x64: 256 file, 260 registry; v5 also 1280 and 1792 from explicit options). GUID generation applies when no GUID is set. It fails for a directory or ODBC key path, or a file whose parents reach `TARGETDIR` before a standard directory such as `ProgramFiles64Folder`.
+Bit 0x100 marks components of 64-bit packages (observed v3 x64: 256 file, 260 registry; v5 also 1280 and 1792 from explicit options). GUID generation applies when no GUID is set. It fails for a directory or ODBC key path. WiX's algorithm (source), which a producer can follow so that GUIDs match a WiX-built predecessor:
 
-1. `bitness` = `"64"` or `"32"`.
-2. File: `name = "file|" + bitness + "|" + StdDirKey + "\" + join("\", long names of directories below it) + "\" + longFileName`.
-3. Registry: `name = "registry|" + bitness + "|" + RootName + "\" + Key + "\" + ValueName`, with RootName HKCR, HKCU, HKLM, HKU or HKMU (root −1).
-4. `GUID = UUIDv5({D95C3988-291C-4681-A266-EC67FCCB1199}, UTF-8(lower-case(name)))`, upper-case braced. Lower-casing is simple Unicode mapping; `.` directories are skipped; properties stay unresolved.
+1. Canonical directory path: a standard directory is its key, after resolving the `…6432Folder` aliases for the platform (so `ProgramFiles64Folder`, never `PFiles64`); any other directory is its parent's canonical path, `\`, and its long target name lower-cased, a nameless directory adding nothing. A directory may carry an explicit GUID-generation seed that replaces its path.
+2. File key path: `name = canonicalDir + "\" + lower(longFileName)`. Paths that start with `PersonalFolder\my pictures`, `ProgramFilesFolder\common files`, `ProgramMenuFolder\startup`, `TARGETDIR`, `StartMenuFolder\programs` or `WindowsFolder\fonts` are rejected, because the same folder has another standard name and the GUID would not be stable.
+3. Registry key path: `name = lower(("64" if 64-bit else "") + RootName + "\" + Key + "\" + ValueName)`, where RootName is `MachineUser` (root −1), `ClassesRoot`, `CurrentUser`, `LocalMachine` or `Users`, the names of WiX's `RegistryRootType` enumeration (the root's integer in WiX's backward-compatible mode, which reproduces v3 GUIDs).
+4. `GUID = UUID5({3064E5C6-FB63-4FE9-AC49-E446A792EFA5}, name)`: SHA-1 over the namespace in network byte order followed by the UTF-16LE bytes of `name`, version 5 and RFC 4122 variant bits set, upper-case braced. Note the UTF-16LE input: a UUIDv5 over UTF-8 gives a different value.
+5. With more than one file in the component, the key file MUST be versioned and the others MUST be unversioned, or generation fails. Two components with one GUID are an error unless both have conditions, which is a warning.
 
 Extra files in the component only warn. Carry-over: a reference migration process reads `Component(Component, ComponentId)` from a previous release and reuses each matching key's GUID. Previous-versus-new key-path differences require an explicit compatibility assessment.
 
@@ -923,7 +972,7 @@ Extra files in the component only warn. Carry-over: a reference migration proces
 2. Map the RVA through the sections and walk type 16 (RT_VERSION) → first name → first language. Parse `VS_VERSIONINFO` with `VS_FIXEDFILEINFO` (signature 0xFEEF04BD).
 3. Version = `HIWORD(MS).LOWORD(MS).HIWORD(LS).LOWORD(LS)` of the file version (observed: matches Windows).
 4. Language = low words of `VarFileInfo` `Translation`, decimal, comma-joined, stored order, no duplicates. Observed `2057`; observed v5: 17 entries unsorted (`1028,2052,1053,…`).
-5. No translations → `0`; fonts → NULL. No version resource → `Version` and `Language` NULL unless configured.
+5. No translations → NULL, which is what `MsiGetFileVersion` returns and WiX stores (source); fonts → NULL. No version resource → `Version` and `Language` NULL unless configured.
 
 `MsiFileHash(File_, Options = 0, HashPart1..4)` holds the MD5 of each unversioned file as four little-endian signed int32 (observed on every unversioned file of a real package). Versioned files get no row (observed v3 and v5). Authoring may use bind-time values: file version and language, final properties, and `ProductVersion.Major/Minor/Build/Revision` (missing fields 0).
 
@@ -932,11 +981,11 @@ Extra files in the component only warn. Carry-over: a reference migration proces
 Observed v3: by File key case-insensitively within a disk (`Apple`, `banana`, `Cherry`, `date`). Observed v5: by directory path case-insensitively, then filename ordinally, then key (`README.txt, Setup.dll, Zeta.dll, app.exe`; every file of a WiX 5-built package).
 
 1. Group files by `DiskId`.
-2. Sort by target directory path (ordinal on upper-cased UTF-16), then long name ordinally, then key ordinally. The path joins long names from `TARGETDIR` with `\`.
-3. Number from 1 across disks in ascending `DiskId`; `LastSequence` = the disk's highest number, 0 if empty.
+2. Sort by the component's canonical directory path (section 11.4: standard keys as they are, other names lower-cased, joined with `\`), ordinal; then by file name, ordinal; then by key, ordinal (source).
+3. Number from 1 across disks in ascending `DiskId`; `LastSequence` = the disk's highest number, 0 if empty (source). A merge module has no `Media` rows and numbers its files from 1 into `#MergeModule.CABinet` (source).
 
 - Explicit media: `Cabinet` = name, or `#` + name when embedded; NULL without compressed files.
-- `MediaTemplate`: `cab{0}.cab` from 1 (observed v3 and v5), `DiskId` = cabinet number. A new cabinet starts when the next file would exceed 200 × 2²⁰ uncompressed bytes (observed v5).
+- `MediaTemplate`: `cab{0}.cab` from 1 (observed v3 and v5), `DiskId` = cabinet number. A new cabinet starts when the running total would exceed 200 × 2²⁰ uncompressed bytes, strictly greater (observed v5; source). At most 999 cabinets: the 999th takes every remaining file (source).
 - A larger file gets its own cabinet (observed v5: `cab2.cab`, `LastSequence` 9 → 10). The limit is configurable, also via `WIX_MUMS`. Cabinet embedding is a producer option, not a general MSI requirement.
 - Default compression: `mszip` in v3 (observed), `medium` in v4+.
 - One cabinet per `Media` row, files in sequence order, named by File key, one folder (observed v3). WiX v5 shares identical data (observed); Independent readers should account for identical content represented through shared cabinet storage.
@@ -954,6 +1003,8 @@ Products get all five tables (observed v3 and v5) with the actions of sections 9
 5. Errors: a chain that never reaches a fixed node (missing or suppressed anchor), and a cycle. Also errors: a number ≤ 0 other than −1…−4, a number > 32767, and a block overlapping another fixed number.
 
 Before-lists expand depth-first, and generated entries such as the upgrade removal take part in definition order (observed v5).
+
+Confirmed by WiX's binder (source): a chain that runs into the previous or next fixed number is an error, not a shift; an action scheduled relative to a termination action (−1 … −4) is an error; a missing standard anchor is added at its default number; two fixed actions with one number are a warning; `DuplicateFiles` pulls in `InstallFiles`. In a merge module, standard actions MUST have numbers and custom actions MUST NOT, because `mergemod.dll` re-sequences them.
 
 - v3: before InstallFinalize → 6599; after InstallFinalize → 6601; after InstallValidate → 1401.
 - v5: `PrepA` before WriteRegistryValues, `PrepA2` after `PrepA`, `PrepB` before it, `PostA` after it → 4997, 4998, 4999, 5000, 5001.
@@ -991,8 +1042,7 @@ The separator defaults to `;`. Create cannot combine with `[~]`, so append or pr
 
 **Unverified (chapter 10):**
 
-- `File.Language` WiX writes for a versioned file without translations (one reference profile writes `0`); PID 14 default for 32-bit v3.
-- Whether the cabinet limit compares with > or ≥; WiX's behaviour when a numbered block hits another fixed number.
+- PID 14 default for 32-bit v3. (A versioned file without translations gets a NULL `Language`, the cabinet limit compares with `>`, and a numbering collision is an error: source.)
 - Downgrade-row attributes (for example 0x100), and `LaunchCondition` versus a type-19 block; the modularization exclusion list.
 
 ## 12. Digital signatures
@@ -1103,7 +1153,7 @@ Evidence: WiX documentation (no source code), WiX 3.11 packages, and a WiX 5.0.2
 | Cabinet split | 200 MB | 200 × 2²⁰ = 209,715,200 bytes; split when the next file would exceed it (obs) |
 | Identical file content | "smart cabbing" documented | stored once per cabinet; the first copy starts a new folder (obs) |
 | Default scope | none: no `ALLUSERS`, Word Count 0x8 clear | per-machine `ALLUSERS=1`; v4 `perUserOrMachine` (`ALLUSERS=2`, `MSIINSTALLPERUSER=1`); v7 `perMachineOrUser` (`ALLUSERS=2`) (docs) |
-| Architecture and bitness | per-component 64-bit flag | `x86`/`x64`/`arm64`, default `x86`; bitness `default`/`always32`/`always64` (docs) |
+| Architecture and bitness | per-component 64-bit flag | `x86`/`x64`/`arm64`, default `x86`; bitness `default`/`always32`/`always64` (docs). v7's platform set is `Intel`, `x64` and `Arm64` only, so `Intel64` packages can no longer be built (source) |
 | Component GUID | generated | RFC 4122 version-5 form (obs); registry key-path GUIDs changed, v6 option restores v3 ones (docs) |
 | `TARGETDIR`, standard folders | authored; `DefaultDir` `.` or a name | implicit, even when only referenced; `PFiles64`, `PMenu` (obs) |
 | Generated keys | prefix + 32 hex digits | prefix + 27 chars of `[A-Za-z0-9._]` (`reg`, `fls`, `d`, `scp`); harvested component key = file key (obs) |
@@ -1139,7 +1189,7 @@ Unchanged (obs): `_Validation` rows (four descriptions differ only in whitespace
 ### Unverified
 
 - Code pages: build-host dependence of the summary default; the v4.0.x database default.
-- Cabinets: `>` versus `≥` at the limit (tool: `>`); which level gives LZX-21; smart cabbing for non-adjacent copies and in v3.
+- Cabinets: smart cabbing in v3. (`>` at the limit, LZX windows per level and the smart-cabbing mechanics: sections 5 and 11.6, source.)
 - Rows: Word Count 0x8 for dual-purpose scopes; the default downgrade block; per-user program-files rows; empty harvested directories; default feature key and install-folder short name.
 - Names: other standard-folder `DefaultDir` names, key prefixes and relative-subdirectory keys; short-name collisions; v4 file order; `SecureCustomProperties` case rule.
 - Summary and v3: PID 19 and multi-language PID 7 in v4+; v3 defaults for PID 3 and 5; v3 `CreateFolder` for empty components.
@@ -1179,6 +1229,12 @@ Unchanged (obs): `_Validation` rows (four descriptions differ only in whitespace
 - W12: Versioned file replacement and component key-path behavior.
 - W13: Arm64 component flags and registry redirection.
 
+- W14: Summary SystemIdentifier 0x00020005 versus 0x00020006, and a summary code page of 65001 (section 4).
+- W15: 65535 and 65536 entries in one cabinet; an `.msi` above 2 GB made of several embedded cabinets (sections 5, 11.6).
+- W16: Whether `WriteEnvironmentStrings` broadcasts `WM_SETTINGCHANGE` for `Environment` (section 17.1).
+- W17: Per-user rollback of a failing deferred action scheduled after `PublishProduct` versus after `InstallFiles` (section 8.2).
+- W18: A TrackDiskSpace dialog whose Text control reads `[INSTALLDIR]`, with and without a trailing space (section 7.2).
+
 Each experiment should record binary SHA-256, Windows build, architecture, exact input, command/API, error status, MSI verbose log, serialized output and independent-reader comparison. Negative results must be preserved, not reinterpreted as proof of an unrelated format rule.
 
 ### Security
@@ -1188,6 +1244,8 @@ All parsers should bound allocations and offsets, detect CFB chain cycles, valid
 ### Independence
 
 This document prescribes no language, build system, CLI, encoder, XML dialect or custom-action policy. Implementation recipes and example project architectures belong outside the shared format specification.
+
+Statements marked **(source)** come from reading WiX (MS-RL) and msitools (LGPL-2.1 / GPL-2.0) code at the commits named in section 17.6. They describe behaviour. An implementation that wants to stay independent of those licences MUST NOT copy, translate or paraphrase that code, or code from Wine, libgsf or libgcab; the algorithms in sections 11.3, 11.4 and 11.7 are behaviour descriptions to be implemented from this text. Comparing packages black-box and running independent readers over them is fine; copying another toolchain's dialogs, texts, bitmaps, binaries or custom-action DLLs is not.
 
 ## 15. Test vectors and verification
 
@@ -1248,8 +1306,8 @@ Inputs are exact strings; ␟ is U+001F and hex is upper case.
 |---|---|---|
 | Generated ID, Registry | `"Registry"␟"2"␟"Software\Example\Demo"␟"InstallDir"␟"[INSTALLDIR]"␟"MainComponent"` | `regACB8D9C291D74FFC95A56B6749EF85D3` |
 | Generated ID, RemoveFile | `"RemoveFile"␟"MainComponent"␟""␟"INSTALLDIR"␟"2"` | `rmf075233CA558936A081917F5B524D485E` |
-| Component GUID, file | `file\|64\|ProgramFiles64Folder\Example\bin\tool.exe`, lower-cased | `{14F51D5B-FA36-578D-96E5-FBFE0CDCFB5A}` |
-| Component GUID, registry | `registry\|64\|HKCU\Software\Example\Demo\Installed`, lower-cased | `{B1B43A9D-78C8-5312-A1B3-7527E742B531}` |
+| Component GUID, file (superseded) | `file\|64\|ProgramFiles64Folder\Example\bin\tool.exe`, lower-cased, UTF-8 UUIDv5 with the former namespace `{D95C3988-…}` | `{14F51D5B-FA36-578D-96E5-FBFE0CDCFB5A}`; section 11.4 now uses WiX's scheme, and its vectors MUST be taken from a WiX-built package |
+| Component GUID, registry (superseded) | `registry\|64\|HKCU\Software\Example\Demo\Installed`, lower-cased, as above | `{B1B43A9D-78C8-5312-A1B3-7527E742B531}`; same note |
 | Short name | `INSTALLDIR`, `Uninstall App` | `c7b1kcnl` (n = 0) |
 | Short name | `INSTALLDIR`, `averylongname.go` | `bmy3tsvy.go` |
 | Short name | `ProgramMenuFolder`, `Example Application.lnk` | `1njilign.lnk` |
@@ -1279,7 +1337,7 @@ GNOME msitools and WiX are comparative implementations, not authorities for all 
 
 ### Interoperability reports
 
-Historical [GNOME msitools reports](https://gitlab.gnome.org/GNOME/msitools/-/issues) provide candidate tests for out-of-order table rows (#99), long-string encoding (#60), CAB continuation (#68), malformed FAT entries (#33) and UI control cycles (#63). These are **reported** cases until minimized fixtures are validated with native Windows Installer APIs and runtime.
+Historical [GNOME msitools reports](https://gitlab.gnome.org/GNOME/msitools/-/issues) provide candidate tests for out-of-order table rows (#99), long-string encoding (#60), CAB continuation (#68), malformed FAT entries (#33) and UI control cycles (#63). These are **reported** cases until minimized fixtures are validated with native Windows Installer APIs and runtime. [WiX issues](https://github.com/wixtoolset/issues) add candidates for a raw `REG_MULTI_SZ` search (1108), costing without components (1790), OS-file version checks on Windows 10+ (5824), service failure actions (5964), per-user rollback (8574) and media above 2 GB (8601).
 
 ### Native binary sample inspection
 
@@ -1291,7 +1349,98 @@ The supplied x64 samples were inspected statically. msi.dll exports MsiOpenDatab
 | msiexec.exe | `6c63cfd4cb36998e9ff763117d4a74193ba72a5fc7f51ea7210f9065c2188452` |
 | cabinet.dll | `9e5e94280b3f6f4249ce4f1e78625372a66f01fefa3d2132a180f84c5c4ba7ff` |
 
-## 17. Reference chapters
+## 17. The engine without custom-action code
+
+Windows Installer does most of what a package needs from its own tables. This section lists what it does natively, what the two open-source toolchains could not get from it and reached for code instead, and what a package can do in each case while shipping no custom-action DLL. msitools' `wixl` is the existence proof: it writes nothing but tables (section 17.4) and its packages install.
+
+### 17.1 Native, with the caveats the toolchains learned
+
+| Need | Native mechanism | Caveats (reported, source) |
+|---|---|---|
+| Files, folders, empty folders | `File`, `CreateFolder`, `RemoveFile` (with `*`/`?` wildcards for files of one folder), `RemoveFolder`, `DuplicateFile`, `MoveFile` | `RemoveFile` never recurses; folders filled at run time need a code action (17.2) |
+| Registry | `Registry` (`#`, `#%`, `#x`, `[~]` encodings of section 10.2), `RemoveRegistry` | Key deletion is `-` or `*` rows; a raw `REG_MULTI_SZ` search breaks public properties (8.7) |
+| INI files, `.url` files | `IniFile`, `RemoveIniFile` | An Internet shortcut is an INI file with `[InternetShortcut]` / `URL=`; WiX creates them through a DLL, `IniFile` rows do the same |
+| Environment | `Environment` | WiX does not rely on the engine's own `WM_SETTINGCHANGE` broadcast and sends another from a custom action "best effort" (source); experiment W16 |
+| Shortcuts | `Shortcut`, `MsiShortcutProperty`, `Icon` | Advertised shortcuts need a file key path (ICE19) |
+| Services | `ServiceInstall`, `ServiceControl`, `MsiServiceConfig` (delayed start, SID type, pre-shutdown, failure flag) | `MsiServiceConfigFailureActions` restart and reboot actions do not work (10.3): `sc.exe failure` instead (17.3) |
+| Permissions | `LockPermissions`, `MsiLockPermissionsEx` (SDDL, 5.0) | WiX's `SecureObjects` DLL exists for inheritance flags and domain lookups the tables cannot express |
+| COM, file types, MIME, type libraries, fonts, ODBC, GAC | `Class`, `ProgId`, `Extension`, `Verb`, `MIME`, `TypeLib`, `Font`, `ODBC*`, `MsiAssembly*` | All driven by standard actions (9.3) |
+| Searches and conditions | `AppSearch` with the locator tables, `LaunchCondition`, `Condition` (feature levels) | OS-file versions lie on Windows 10+ (8.6) |
+| Upgrades | `Upgrade`, `FindRelatedProducts`, `MigrateFeatureStates`, `RemoveExistingProducts` | REP window rules (9.2); a 259 return ends an install successfully when a newer version exists (8.11) |
+| Scope, folders, UI | `ALLUSERS`, `MSIINSTALLPERUSER`, `Privileged`, type-51 actions, control events, `SetTargetPath`/`CheckTargetPath` | Per-user rollback gap (8.2); costing never completes without components (7.2) |
+| Files in use, reboot | Restart Manager dialog and `RMShutdownAndRestart`; `ScheduleReboot`, `ForceReboot`, `REBOOT` | A custom action asks for a reboot with `MsiSetMode(REBOOTATEND)` (8.11) |
+| Running a program | Type 2, 18, 34 and 50 EXE actions | The engine shows the program's console window and keeps none of its output; WiX's `QuietExec` DLL runs it hidden and copies the output into the log (source). Without a DLL, `cmd.exe /c … >> "[TempFolder]name.log"` keeps the output but not the window |
+| Logging, progress, cancel | `ActionText`, `Error`, progress records from actions, `MsiProcessMessage` return codes | Explicit-progress protocol in 8.11 |
+
+### 17.2 Where the toolchains reach for code
+
+WiX ships custom-action DLLs for these (source: the `ca` directories of its extensions). The right column is the DLL-free alternative, where one exists.
+
+| Need | WiX custom action | Why the engine cannot | Without a DLL |
+|---|---|---|---|
+| Edit XML or other text files in place | `XmlFile`, `XmlConfig`, `FormatFiles` | No table edits file contents | Ship complete files, or a type-34 `cmd.exe`/PowerShell action without rollback |
+| Remove a folder tree created at run time | `RemoveFoldersEx` (immediate; adds temporary `RemoveFile` rows for each subfolder, skipping junctions) | `RemoveFile` and `RemoveFolder` take one folder each | `RemoveFile` rows for every folder known at build time |
+| Remove a registry tree created at run time | `RemoveRegistryKeysEx` | `RemoveRegistry` and `-` rows need known keys | — |
+| Users, groups, group membership | `CreateUser`, `CreateGroup`, … with rollback and commit pairs | No table | — |
+| File shares, performance counters, event manifests | `CreateSmb`, `RegisterPerfCounterData`, `wevtutil` through `QuietExec` | No table | Event-log sources, which only need registry values, are native (10.3) |
+| Firewall rules, HTTP URL reservations, certificates | `FirewallExceptions`, `HttpCerts`, `WixHttpCa` | No table | `netsh advfirewall firewall` (17.3); `netsh http` similarly |
+| Service recovery actions | `SchedServiceConfig`/`ExecServiceConfig` (`ChangeServiceConfig2` with `SeShutdownPrivilege`, saving the old values for rollback) | The native table is broken (10.3) | `sc.exe failure` (17.3), without rollback of the previous values |
+| Close running applications gracefully | `CloseApplications` (`WM_CLOSE`, `WM_QUERYENDSESSION`, Restart Manager registration, terminate) | Restart Manager only restarts registered applications | Restart Manager handles the common case |
+| Run a program quietly and log its output | `QuietExec`, `SilentExec`, `ShellExec`, `UnelevatedShellExec` | See 17.1 | Native EXE actions; `cmd.exe /c … >> log` |
+| Wait for an event, fail on purpose, exit early | `WaitForEvent`, `FailWhenDeferred`, `CancelWhenDeferred`, `ExitEarlyWithSuccess` | Test and flow-control helpers | `ExitEarlyWithSuccess` is a one-line DLL returning 259; without a DLL, a `LaunchCondition` on the detection property stops the install with a message, as a failure |
+| Reboot requested by a deferred action | `CheckRebootRequired` after InstallFinalize | Deferred actions cannot call `MsiSetMode` | `ScheduleReboot` conditioned on a property, or `ForceReboot` |
+| Broadcast setting changes | `BroadcastSettingChange`, `BroadcastEnvironmentChange` | Unclear whether the engine broadcasts (W16) | — |
+| Path validation and EULA printing in dialogs | `WixUIValidatePath` (DLL), `WixUIPrintEula` (v3) | `CheckTargetPath` only checks syntax and write access | `SetTargetPath`/`CheckTargetPath` events and `MsiPrint` (10.3) |
+| IIS, SQL, COM+, MSMQ, .NET native images, Visual Studio | the `Iis`, `Sql`, `ComPlus`, `Msmq`, `NetFx`, `VisualStudio` extensions | No tables | — |
+
+Patterns these DLLs share, which the engine imposes on any code action (source): an immediate "schedule" action reads the tables and writes `CustomActionData`; a deferred "execute" action does the work as LocalSystem; a rollback action is scheduled right before it and receives the data it needs to undo; a commit action deletes temporary files or old state after success; every one of them declares `HideTarget` when the data has passwords, which lands the action name in `MsiHiddenProperties` (8.7).
+
+### 17.3 Native recipes with programs that ship with Windows
+
+Both recipes use EXE custom actions on `sc.exe` and `netsh.exe`, so a package needs no DLL. Both were checked by installing and uninstalling on Windows Server 2025 (reported, msitools !98 and !107).
+
+**Service recovery actions.**
+
+1. A type-51 action, scheduled once, sets a property to `[SystemFolder]sc.exe`.
+2. A type-50 action, deferred and no-impersonate (50 + 1024 + 2048 = 3122), uses that property as `Source`. Its `Target` is `failure "<service>" reset= <seconds> actions= restart/<ms>/restart/<ms>/…`.
+3. Schedule it after InstallServices (else after InstallFiles, else after InstallInitialize), with condition `$<Component> > 2`: installed locally or run from source.
+
+- Give a delay only to `restart` actions. Leave out trailing `none` actions; a `none` between two other actions cannot be expressed.
+- Quote arguments the way the C runtime parses them: double the backslashes before a quote and at the end of a value. `Target` holds 255 characters at most.
+- A failing `sc.exe` fails the install. The previous recovery actions are not restored on rollback.
+
+**Firewall rules.**
+
+- Run `netsh advfirewall firewall …` from `[System64Folder]` in 64-bit packages and `[SystemFolder]` otherwise, as deferred, no-impersonate EXE actions.
+- On install and repair, delete every rule by name and direction first, then add each rule; a rollback action deletes what was added. Delete all rules before adding any, so a TCP and a UDP rule with one name survive.
+- On removal, delete by name and direction only, because a port or address taken from a property may differ at maintenance time; a rollback action adds the rule back. Deleting never fails the install (Continue, 64).
+- Rules name a program (`program="[#File]"`) or a port and protocol (TCP by default), with remote addresses or a scope and a profile (all by default).
+- Unverified: removing only the feature (`REMOVE=<Feature>`) when the port came from a property.
+
+### 17.4 wixl, a toolchain without custom-action code
+
+msitools' `wixl` writes exactly these tables (source), and its packages install, upgrade and uninstall on current Windows (reported): the five sequence tables, `Directory`, `Media`, `Property`, `Icon`, `Binary`, `Component`, `Feature`, `FeatureComponents`, `RemoveFile`, `Registry`, `Condition`, `ServiceControl`, `ServiceInstall`, `File`, `IniFile`, `RemoveIniFile`, `_Streams`, `Shortcut`, `Upgrade`, `LaunchCondition`, `AppSearch`, `Signature`, `CustomAction`, `ActionText`, `RegLocator`, `CreateFolder`, `MsiFileHash`, `Environment`, `DuplicateFile`, `MoveFile`, `Error`, `_Validation`, and with its UI extension `CheckBox`, `Control`, `ControlCondition`, `ControlEvent`, `Dialog`, `EventMapping`, `ListBox`, `RadioButton`, `TextStyle` and `UIText`. Its custom actions are type 19, 35, 51, EXE and script rows; it has never shipped a DLL.
+
+### 17.5 "This installation package could not be opened" (1620)
+
+Several msitools reports (#61, #76, #86) end with this message, a verbose log line `Note: 1: 2203 2: <path> 3: -2147287039` and `MainEngineThread is returning 1620`: the engine failed to open the compound file before reading any table. In #76 the package was fine and the test machine was at fault, so rule these out first:
+
+1. The file was damaged in transfer: compare its SHA-256 with the build output.
+2. It is on a network share, or `msiexec` got a relative path: copy it locally and pass an absolute path.
+3. It carries the downloaded-file mark: run `Unblock-File`.
+4. Security software rewrote or locked it.
+
+A policy block gives a different message ("The system administrator has set policies to prevent this installation"). Only when all four are ruled out is the container suspect; an independent reader (section 14) should then find the fault.
+
+### 17.6 Source files consulted
+
+WiX at `53215fc427b48005770d6814d9e6a48c048907ee` (2026-10-24, MS-RL), under `src/`: `api/wix/WixToolset.Data/WindowsInstaller/{WindowsInstallerStandard,WindowsInstallerConstants,TableDefinition}.cs`; `wix/WixToolset.Core.WindowsInstaller/Bind/{SequenceActionsCommand,BindSummaryInfoCommand,FinalizeComponentGuids,CreateCabinetsCommand,CabinetBuilder,BindDatabaseCommand,CreateIdtFileCommand,GenerateDatabaseCommand,AssignMediaCommand,OptimizeFileFacadesOrderCommand,UpdateMediaSequencesCommand,UpdateFileFacadesCommand,CreateSpecialPropertiesCommand,ValidateWindowsInstallerProductConstraints,AddCreateFoldersCommand,ProcessPropertiesCommand,CreateWindowsInstallerDataFromIRCommand}.cs`; `wix/WixToolset.Core.WindowsInstaller/Validate/ValidateDatabaseCommand.cs`; `wix/WixToolset.Core.Native/{WindowsInstallerValidator.cs,Msi/MsiInterop.cs}`; `wix/WixToolset.Core/{Common.cs,ExtensibilityServices/{PathResolver,Uuid}.cs}` and two comments in `Compiler.cs`; `wix/wixnative/smartcab.cpp`; `libs/dutil/WixToolset.DUtil/cabcutil.cpp`; `libs/wcautil/WixToolset.WcaUtil/{wcautil,wcawrap}.cpp`; `ext/Util/ca/*.cpp`, `ext/Util/wixlib/UtilExtension_Platform.wxi`, `ext/Firewall/ca`, `ext/UI/wixlib/{WixUI_Advanced,WixUI_InstallDir,InstallScopeDlg,MsiRMFilesInUse}.wxs` and `Common_Platform.wxi`. WiX issues 1108, 1790, 2475, 5824, 5964, 8574 and 8601.
+
+msitools at `8deb133` (2026-10-24, LGPL-2.1 for libmsi, GPL-2.0 for the tools): `libmsi/{string,table,libmsi-database,libmsi-summary-info}.c`; `tools/wixl/{builder,msi,msi-default,util}.vala`.
+
+No code from these files appears in this document (section 14, Independence).
+
+## 18. Reference chapters
 
 The detailed chapters and schema files referred to above are not contained in this repository. Their contents and hash vectors are therefore reference claims until the complete source inputs and validation artifacts are published.
 
