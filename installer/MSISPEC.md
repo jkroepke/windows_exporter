@@ -28,6 +28,7 @@ As of 2026-10-25.
 - [16. Independent implementation comparison](#16-independent-implementation-comparison)
 - [17. The engine without custom-action code](#17-the-engine-without-custom-action-code)
 - [18. Reference chapters](#18-reference-chapters)
+- [Appendix B. Pitfalls and checks](#appendix-b-pitfalls-and-checks)
 
 ## Purpose and scope
 
@@ -1453,3 +1454,88 @@ The detailed chapters and schema files referred to above are not contained in th
 | 11 | MSI Authenticode signing |
 | 12 | Conformance fixtures and implementation comparison |
 | Appendix A | Reproducible test vectors |
+
+## Appendix B. Pitfalls and checks
+
+Every pitfall below has cost someone an install on a customer's machine. Each row names the symptom Windows shows, a check that catches it before Windows does, and the section with the rule. Checks marked **static** need only the package; **ICE** names the validation rule that catches it when the ICE cubes run (section 14); **Windows** needs an install with `msiexec /i pkg.msi /l*vx log.txt` and a search of the log.
+
+### B.1 Container, database and summary
+
+| Pitfall | Symptom | Check | Section |
+|---|---|---|---|
+| Table rows not stored in key order (for example a row inserted into an existing package) | Error 2211 opening the table; `Property` unreadable, so "missing product code", return 1605 | **static:** re-read every table stream and compare its key tuples with a sort of themselves; **Windows:** log line `Note: 1: 2211` | 3 |
+| Long string-pool entry written as `0, high, low, refcount` | Package does not load once a string exceeds 65535 bytes (a license RTF) | **static:** decode the pool with the layout `0, refcount, low, high` and check that the decoded lengths sum to the `_StringData` size; test fixture with a 70,000-byte string | 3 |
+| String refcounts that omit `_Tables` and `_Columns`, or an empty string stored instead of NULL | Independent readers fail; the engine's behaviour is untested | **static:** recount references over every stream and compare; reject length-0 strings | 3 |
+| More than 32 columns, a table name over 31 characters, or a binary stream name over 62 characters | `msi.dll` refuses the table or stream; WiX refuses to write it | **static:** schema check on every table and `Table.Key` stream name | 3 |
+| Column widths read with the wrong byte order on a big-endian host | Every integer and string ID garbled; "string table load failed" | **static:** run the appendix A vectors on a big-endian target | 3, 15 |
+| Summary code page 65001 or 1200 | The database cannot be opened: 1620 | **static:** PID 1 MUST be an ANSI page ≤ 32767; **Windows:** `MainEngineThread is returning 1620` | 4 |
+| Page Count below the platform minimum (x64 < 200, Arm64 < 500) | "This installation package is not supported by this processor type" or refusal on the platform | **ICE80**; **static:** PID 14 against the Template platform | 4, 8.2 |
+| Template platform misspelled (`X64`, `arm64`) or `Intel64` on a current WiX | Package rejected, or an x86 package where a 64-bit one was meant | **static:** exact tokens `Intel`, `x64`, `Arm64`; `Intel64` only for Itanium | 4 |
+| Summary times converted through local time | Times shift by an hour across daylight saving; reproducible builds differ | **static:** write FILETIME from UTC; compare two builds under different `TZ` | 4 |
+| A 0-byte stream with a mini-stream start sector | One CFB library fails to open the package | **static:** write ENDOFCHAIN for size 0; readers accept any start sector at size 0 | 2 |
+
+### B.2 Cabinets and media
+
+| Pitfall | Symptom | Check | Section |
+|---|---|---|---|
+| `File.Sequence` order differs from the cabinet's entry order, or a file is in no `Media` range | Wrong file contents or error 2350 at install | **ICE04**, **ICE71**; **static:** walk each cabinet and compare `szName` sequence with `File.Sequence` within the `Media` row's range | 5, 11.6 |
+| `.msi` above 2 GB (sum of embedded cabinets), or a cabinet above 2 GB | "The system cannot open the device or file specified" | **static:** size of the output and of each cabinet; split into external cabinets beyond that | 5 |
+| More than 65535 entries in one cabinet | FCI fails at build; a hand-written cabinet is unreadable | **static:** `cFiles` ≤ 65535 per cabinet | 5 |
+| Spanned cabinet set with non-consecutive `DiskId` values | Error 2350, "FDI server error" | **static:** never write spans; readers of other packages check the `DiskId` order | 5 |
+| MSZIP block history reset within a folder | Scattered wrong bytes in extracted files, "invalid cabinet chunk" later | **static:** round-trip a three-block folder with cross-block matches and compare bytes | 5 |
+| Cabinet entry dates from local time | Builds differ between time zones | **static:** compare two builds under different `TZ`; use UTC or `SOURCE_DATE_EPOCH` | 5 |
+| Uncompressed files in a compressed package placed in a tree | Source not found at install (1308/1311) | **static:** with Word Count bit 2, every uncompressed file must sit at the source root | 5 |
+
+### B.3 Tables and values
+
+| Pitfall | Symptom | Check | Section |
+|---|---|---|---|
+| Executable without `File.Version` | Upgrades keep the old binary: "Disallowing installation of component … since the same component with higher versioned keyfile exists" | **static:** every PE file with a version resource has `Version` and `Language` and no `MsiFileHash` row; unversioned files have a hash row | 8.6, 11.5 |
+| Companion file as key path, or `Version` naming a nonexistent File key | File never updates; validation error | **ICE**-style **static** check: `Version` is a version or an existing File key; a companion file is not a `KeyPath` | 8.6 |
+| Long name without an 8.3 short name | Install fails on `SHORTFILENAMES` or old volumes; ICE errors | **ICE03** (Filename category); **static:** every `short\|long` has a valid short part | 6.4, 11.3 |
+| Root directory other than `TARGETDIR` / `SourceDir`, or `ProgramFiles6432Folder` written as a key | Folder created literally under `TARGETDIR` | **ICE56**; **static:** alias keys never reach the `Directory` table | 8.2, 8.3 |
+| `ProgramFilesFolder` in an x64 package | Files land in `Program Files (x86)` | **ICE80**; **static:** 64-bit components under `ProgramFiles64Folder` | 8.2 |
+| Arm64 package without component bit 256 | Files and registry values in the 32-bit views | **static:** every component of a 64-bit package has bit 256 unless marked 32-bit | 8.2 |
+| Empty-folder component without `CreateFolder`; service executable not the key path | Folder not created or not removed; service not repaired | **ICE18**; **static:** directory key paths have a `CreateFolder` row; `ServiceInstall` components key on the executable | 8.4 |
+| Environment `-` polarity inverted; `PATH` extended without `[~]` | Variables left behind after uninstall, or `PATH` overwritten | **static:** `-` present unless permanent; `PATH` values contain `[~]` | 11.9 |
+| Registry integer, binary, expandable or multi-string value without its `#` / `[~]` encoding | Wrong type written | **static:** `Registry.Value` encodings of section 10.2 | 10.2 |
+| Property `*` left in `ProductCode`, or a GUID not braced upper-case | Validation and identity failures | **ICE05**, **ICE16**; **static:** GUID syntax on every Guid column | 8.1 |
+| Upgrade `ActionProperty` not public or not in `SecureCustomProperties` | Elevated install keeps both versions | **static:** upper-case names, all listed | 8.10 |
+| Raw `REG_MULTI_SZ` search into a public property | Later dialogs misbehave; UI cannot uninstall | **static:** `RegLocator.Type` 2 on a public property is a warning | 8.7 |
+| Version check on a file under `SystemFolder` | Wrong result on Windows 10+ | **static:** warn on `Signature.MinVersion` for files in system folders | 8.6 |
+| Empty `Feature.Level`, feature depth over 16, more than 65536 components | Crash or refusal at build, or engine limits | **static:** defaults applied; counts checked | 8.5 |
+
+### B.4 Sequences and custom actions
+
+| Pitfall | Symptom | Check | Section |
+|---|---|---|---|
+| `RemoveExistingProducts` outside its four windows (relative scheduling that drifted) | Error 2613, "RemoveExistingProducts action sequenced incorrectly" | **ICE63**; **static:** REP window check after numbering | 9.2, 11.7 |
+| Deferred action outside InstallInitialize–InstallFinalize | Error 2762 | **ICE77**; **static:** every type with bit 1024 lies in the span | 8.11, 9.4 |
+| Type 51 marked deferred; async-no-wait on a non-EXE type; TS-aware immediate | Invalid custom action type | **ICE68**; **static:** the type rules of section 9.4 | 9.4 |
+| Numbering collision between a relative chain and a fixed action | Two actions with one number; order undefined | **static:** error, not a shift, when a chain reaches a fixed number | 11.7 |
+| Deferred action with passwords in `CustomActionData` and no `HideTarget` | Secrets in the verbose log | **static:** HideTarget on such actions and their names in `MsiHiddenProperties` | 8.7, 8.11 |
+| Failing deferred action scheduled after `PublishProduct` in a per-user package | Rollback leaves the product in Apps & features; uninstall and repair fail | **static:** warn when a deferred custom action follows `RegisterProduct`; **Windows:** W17 | 8.2 |
+| `MsiServiceConfigFailureActions` with restart or reboot actions | Error 1939 and rollback | **static:** reject the table's restart and reboot actions; use the `sc.exe` recipe | 10.3, 17.3 |
+| Standard action names used for custom actions; dialogs in execute sequences | Action never runs; validation errors | **ICE93**, **ICE13** | 9.1 |
+| A custom action returning a value other than 0, 259, 1602 or 1603 | Treated as failure | **static:** EXE actions without Continue fail on any non-zero exit | 9.4 |
+
+### B.5 User interface
+
+| Pitfall | Symptom | Check | Section |
+|---|---|---|---|
+| `Control_Next` ring broken or missing a non-static control | Error 2834, "The next pointers on the dialog … do not form a single loop" | **ICE23**; **static:** walk the ring from `Control_First` | 7.2 |
+| `UIText` key missing | "… is missing from the UIText Table" on the dialog | **static:** every key a control or the engine uses exists | 7.2 |
+| Dialog reached only by `SpawnDialog`/`NewDialog` not in the package; sequence names a missing dialog | Error 2803 / 2810 at run time | **ICE27**, **ICE44** | 7.5 |
+| Package with a `Dialog` table but no error, FilesInUse or end dialogs; no `ListBox` table | ICE20 errors; silent failures | **ICE20**; **static:** the minimal set of section 7.4 | 7.4, 7.5 |
+| Package with no components showing a "please wait for costing" page | The page waits forever | **static:** warn on zero components with a UI | 7.2 |
+| Blank `ControlEvent.Condition`; `[Prop]` text on a TrackDiskSpace dialog without trailing space | Event never fires, or text not updated | **static:** write `1`; append the space | 7.2 |
+| Active control without a bound property | Error 2819 | **static:** every Edit, PathEdit, CheckBox, RadioButtonGroup, ListBox, SelectionTree has a `Property` | 7.2 |
+
+### B.6 Release check sequence
+
+1. **Static:** every check above, the schema check against `_Validation`, and the ICE subset of section 9.5; fail the build on any error.
+2. **Independent readers:** open the package with a reader that is not the producer (section 14, cross-implementation matrix) and extract every file; compare extracted bytes with the sources.
+3. **ICE validation:** run the ICE cubes (`darice.cub`; `mergemod.cub` for modules) and treat every error as a failure, except the known false positives listed in section 14.
+4. **Windows:** install with `/l*vx`, then repair, uninstall, upgrade from the previous release and attempt a downgrade. Search the log for `Note: 1: 2` (internal errors 2xxx), `Return value 3`, `Error 1`, `1402`, `1403` and `Disallowing installation of component`; any hit is a defect until explained.
+5. **Rollback:** install once with a deliberately failing deferred action in the position of the package's own actions and confirm that the product is gone from Apps & features afterwards (W17).
+6. **Signing:** `signtool verify /pa /v` and `Get-AuthenticodeSignature` report `Valid`; flipping a byte reports `HashMismatch` (section 12).
