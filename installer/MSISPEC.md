@@ -26,7 +26,8 @@ As of 2026-10-25.
 - [14. Conformance and verification](#14-conformance-and-verification)
 - [15. Test vectors and verification](#15-test-vectors-and-verification)
 - [16. Field reports from msitools](#16-field-reports-from-msitools)
-- [17. Full specification](#17-full-specification)
+- [17. Reference chapters](#17-reference-chapters)
+- [Appendix B. Windows validation test matrix](#appendix-b-windows-validation-test-matrix)
 
 ## Purpose and scope
 
@@ -1304,3 +1305,93 @@ The detailed chapters and schema files referred to above are not contained in th
 | 11 | MSI Authenticode signing |
 | 12 | Conformance fixtures and implementation comparison |
 | Appendix A | Reproducible test vectors |
+
+## Appendix B. Windows validation test matrix
+
+**Status: proposed, not executed.** These tests are intended for agents working on a disposable Windows development VM. Their job is to falsify or substantiate particular claims in this specification. A successful reader round trip is not proof that `msiexec` accepts a package.
+
+### Agent execution rules
+
+1. Use a dedicated VM and snapshot. Never run intentionally malformed installers or service/registry mutation tests on a production or everyday workstation. Preserve the original Windows binaries; do not replace system `msi.dll`, `msiexec.exe` or `cabinet.dll`. Restore snapshots between stateful installation tests.
+2. Record the Windows edition/build, architecture, locale, privilege, installer and cabinet DLL file versions plus SHA-256 hashes, toolchain versions/commits, exact commands, and any test-certificate setup. Windows 11 x64 or Server 2025 x64 is the baseline; legacy Windows and Arm64 are optional separate guest environments.
+3. Start from a **known-good unsigned minimal MSI**, verified by both the native database API and a full install/uninstall. Change only one variable per negative or boundary variant. Recalculate unrelated length/checksum fields when needed, otherwise failures become ambiguous. Keep a byte-for-byte original control for each experiment.
+4. Treat each case as three distinct conformance levels: **S** = structural CFB/MSI/CAB decoding; **A** = native Windows API open/query/commit or cabinet FDI; **I** = actual installation, repair, upgrade or uninstall. Only run the levels indicated; record each outcome independently.
+5. For each case and variant, create `results/<case-id>/<variant>/` containing fixture or reproducible generator, SHA-256, input parameters, API return codes, raw/decoded stream dumps, logs (including `msiexec /L*V` for I), output hashes, and a `result.md` stating the precise claim, baseline control, observed outcome, Windows build and section references.
+6. Mark each result **Confirmed**, **Contradicted**, **Inconclusive** or **Blocked**, with a link to evidence. Those labels apply only to the *specific* test hypothesis and observed environment. Reproduce unexpected behavior in a clean snapshot. Never mark a test Confirmed merely because a tool returned exit code 0.
+
+**Priority:** P0 = foundational; P1 = important unresolved compatibility claim; P2 = expensive, optional or OS-specific. All initial results are **Not run**. Fixtures mentioned by this summary (for example `test-vectors/minimal.msi`) may not be checked into this repository; if missing, generate and label a substitute rather than silently claiming the published vector was tested.
+
+### Test cases
+
+| ID | Priority | Levels | Controlled fixture / variants | Steps and question to settle | Result |
+| --- | :---: | :---: | --- | --- | --- |
+| ENV-01 | P0 | S/A | Verified unsigned one-file MSI | Inventory exact OS build, locale, privilege, `msi.dll`/`cabinet.dll` versions and SHA-256; query all database tables via native APIs. Verify source MSI hash and control fixture validity. | Not run |
+| ENV-02 | P0 | S/A/I | Equivalent WiX and msitools one-file packages | Produce both with pinned tool versions; compare streams, SummaryInformation, tables and CAB content. Open and install/uninstall both; separate producer differences from format constraints. | Not run |
+| CFB-01 | P0 | S/A | Same logical MSI in CFB v3 vs v4 containers | Hold every logical stream byte constant; validate with CFB reader, call `MsiOpenDatabaseW` on both, compare tables and native return codes. | Not run |
+| CFB-02 | P1 | S/A | Correct, zero and one-byte-mutated root CLSID | Change only the root directory CLSID and record generic-CFB versus native-MSI acceptance or error. | Not run |
+| CFB-03 | P1 | S/A | Empty stream start = ENDOFCHAIN, FREESECT, sector 0 | Keep size zero. Test CFB enumeration and native open/query/commit; determine start-sector rule. | Not run |
+| CFB-04 | P1 | S/A | Identical sibling links with red-black, all-black and invalid colors/heights | Preserve sorted sibling names and payloads; separately mutate colors and links, then test native reader behavior and independent tree validation. | Not run |
+| CFB-05 | P1 | S/A | Encoded table name, literal CAB and `Binary.Key` streams | Check actual UTF-16 directory names and native table/binary extraction, including a name beginning with U+0005. | Not run |
+| CFB-06 | P1 | S/A | Case variants, prefix-related sibling names, correct/incorrect sibling order | Generate separate CFB variants, maintaining valid names; compare native opening, stream lookup and error handling. | Not run |
+| CFB-07 | P2 | S/A/I | Large packages: near 2 GiB v3; 1, 2.2, 3 GiB v4 | Use disposable VM with adequate disk; check v4 threshold, range-lock sector and native open. Attempt `/i` and `/a` only with valid installable packages. | Not run |
+| DB-01 | P0 | S/A | Native-written `_StringPool`, `_StringData`, `_Tables`, `_Columns` | Decode raw catalog and column-major streams with two readers; compare all rows with native `MsiDatabaseOpenViewW` results. | Not run |
+| DB-02 | P0 | S/A | Nullable i2/i4/string/binary custom columns | Commit and reopen integer boundaries, NULLs and non-NULLs; compare raw biased integer encoding against native query values. | Not run |
+| DB-03 | P0 | S/A/I | Identical Property rows sorted vs physically shuffled | Mutate stream row order only; query ProductCode and other keys natively, then attempt installation. Does Windows reject, re-sort or misread? | Not run |
+| DB-04 | P0 | S/A | Stored string lengths 65534, 65535, 65536, 70000 bytes | Create valid adjacent strings, save through native API, inspect long-entry word order and query all values after reopening. | Not run |
+| DB-05 | P1 | S/A | One string referenced 65534, 65535, 65536, 70000 times | Build a valid table with distinct primary keys; commit, inspect refcount overflow behavior and verify all rows natively. | Not run |
+| DB-06 | P1 | S/A | String-ID threshold around 65535 distinct values | Account for system catalog strings; determine when 2-byte row references become 3-byte and when the long-reference flag is set. | Not run |
+| DB-07 | P1 | S/A | Custom tables with 31, 32, 33 columns | Run native CREATE TABLE, execute, commit, reopen and SELECT for each. Capture error and raw serialization to resolve column limit. | Not run |
+| DB-08 | P1 | S/A/I | Database pages 1252, 65001, non-Western code page | Round-trip non-ASCII values through native query APIs, record decoded bytes and attempt valid package installation. | Not run |
+| DB-09 | P1 | S/A/I | Empty table catalog row with no stream vs empty physical stream | Query and recommit via native APIs and compare installability with a known-good control. | Not run |
+| DB-10 | P1 | S/A/I | Complete, missing and empty `_Validation` table | Separate ICE validation results from native DB opening and actual installation; determine whether runtime requires `_Validation`. | Not run |
+| DB-11 | P1 | S/A | Binary column stream with one/two keys and absent stream variant | Compare stream naming, raw bytes, `MsiRecordReadStream` results and failure mode on missing data. | Not run |
+| DB-12 | P2 | S/A | Valid MST with added/deleted row and column changes | Create/apply native transform, inspect raw transform streams, record changes and any unsupported schema mutation. | Not run |
+| DB-13 | P2 | S/A | Broken CFB chain, out-of-range sector, corrupt pool or row count | One mutation per fixture. Compare native open error versus two parsers; record crashes safely without running installer. | Not run |
+| SUM-01 | P0 | S/A | Valid summary PIDs 1, 7, 9, 14 and 15 | Read via `MsiSummaryInfoGetPropertyW` and independent OLE property decoder; verify types, values and raw bytes. | Not run |
+| SUM-02 | P1 | S/A/I | Template `x64;1033` vs `x64;1033,1031` vs `Intel;0` | Change only PID 7. Compare native open and install in compatible locale/architecture; determine multi-language package behavior. | Not run |
+| SUM-03 | P1 | S/A/I | Page Count PID 14 = 100, 150, 200, 301, 405, 500 | Hold architecture and package constant; compare native open, ICE and install errors, then vary platform token. | Not run |
+| SUM-04 | P1 | S/A | Summary code pages 1252, 65001, 1200; LPSTR vs LPWSTR | Read/write through native APIs, decode raw property-set type/bytes and record rejection or canonicalization. | Not run |
+| SUM-05 | P2 | S/A/I | PID 15 Word Count 0, 1, 2, 4, 8, 10 | Install in isolated admin/standard-user sessions; record compression/source/elevation effects separately from summary acceptance. | Not run |
+| SUM-06 | P2 | S/A | Fixed UTC FILETIME and malformed Revision Number GUID | Verify native parsing of PID 12/13/9, time zones and invalid type/GUID behavior. Preserve raw bytes. | Not run |
+| CAB-01 | P0 | S/A/I | Same file: no cabinet, stored CAB and MSZIP CAB | Extract with native FDI and an independent tool, then install through MSI. Compare installed SHA-256 and media handling. | Not run |
+| CAB-02 | P0 | S/A/I | MSZIP input crossing at least three 32768-byte blocks | Use cross-block repeated patterns; validate FDI and MSI extraction byte-for-byte, including a variant without dictionary continuity. | Not run |
+| CAB-03 | P1 | S/A | MSZIP trailing empty final DEFLATE block present/absent | Verify DEFLATE validity independently, then test FDI extraction; identify which variants native cabinet.dll accepts. | Not run |
+| CAB-04 | P1 | S/A | Alter CAB minor version, cbCabinet, checksum and reserve data individually | Call `FDIIsCabinet`/`FDICopy` for each mutation; capture exact acceptance and errors. | Not run |
+| CAB-05 | P1 | S/A/I | Zero-byte file, zero-file folder, embedded/external CAB | Check native extraction and actual installed directory/file state against CAB/Media metadata. | Not run |
+| CAB-06 | P1 | S/A/I | Two CABs; correct/wrong Media.LastSequence across boundary | Exercise embedded and external sources; log cabinet selection, extraction, source prompts and final installed hashes. | Not run |
+| CAB-07 | P2 | S/A | Cabinet file entry name 254/255/256 bytes | Test FDI extraction with valid control and optional non-ASCII variant; record actual enforced name limits. | Not run |
+| CAB-08 | P2 | S/A/I | Real LZX reference CAB and continued-folder cabinet set | Compare native FDI, msitools and MSI payload handling. Record compression window and continuation errors. | Not run |
+| RUN-01 | P0 | S/A/I | Published A.5 minimal MSI if present, else labeled substitute | Open/query; `msiexec /i ... /qn /norestart /L*V`, verify installed file, `/x`, verify removal; mark missing published fixture explicitly. | Not run |
+| RUN-02 | P0 | A/I | Old/new versioned EXEs, fixed component keys | Install old; upgrade to new; repair in clean snapshot. Compare File.Version fields, real executable resources, logs and installed hashes. | Not run |
+| RUN-03 | P0 | A/I | Related products: higher, equal, lower ProductVersion | Vary ProductCode/PackageCode correctly, preserve UpgradeCode; exercise FindRelatedProducts/RemoveExistingProducts sequencing, downgrade and rollback. | Not run |
+| RUN-04 | P1 | A/I | Downgrade restriction via Upgrade+LaunchCondition vs type-19 action | Attempt downgrade; compare exit codes and log sequence. Ensure earlier version remains installed after failure. | Not run |
+| RUN-05 | P1 | A/I | Disposable test service using ServiceInstall/ServiceControl | Install/start/repair/stop/uninstall; inspect `sc.exe` and registry, service key path and Wait action behavior. | Not run |
+| RUN-06 | P1 | A/I | ALLUSERS 1/2 and MSIINSTALLPERUSER, dual context | Use admin and standard user sessions. Verify actual filesystem, HKCU/HKLM, ARP and elevated execution; compare summary 0x8. | Not run |
+| RUN-07 | P1 | A/I | 32-bit vs bit-0x100 components (x64; Arm64 optional) | Install disposable registry-value component; inspect native and WOW6432Node views and logs for each variant. | Not run |
+| RUN-08 | P1 | A/I | Environment name flags `=-*`, `+-`, `=-`, PATH `[~]` | Snapshot user/machine environment; install, repair and uninstall; compare exact values, removal and permanence. | Not run |
+| RUN-09 | P1 | A/I | Public property with/without SecureCustomProperties and deferred use | Run elevated install with distinct property value; inspect execute-sequence visibility and verbose logs, not just UI output. | Not run |
+| RUN-10 | P1 | A/I | ControlEvent blank vs `1` conditions and valid/invalid tab ring | Launch interactive full UI; capture actual transitions, tab order and MSI error messages. Do not infer UI behavior from `/qn`. | Not run |
+| RUN-11 | P2 | A/I | Same ProductCode with changed PackageCode and a same-code control | Install and run maintenance/reinstall; capture native exit/error codes including whether error 1638 occurs. | Not run |
+| RUN-12 | P1 | A | Known empty and non-empty files; raw MD5 comparison | Call `MsiGetFileHashW`; compare the four signed 32-bit parts with raw 128-bit hash and MsiFileHash rows; do not assume their representation. | Not run |
+| SIG-01 | P0 | S/A | Unsigned control signed with disposable RSA test certificate | Sign using `signtool sign /fd SHA256`; decode PKCS#7, compute logical MSI digest, verify with signtool and `Get-AuthenticodeSignature`. | Not run |
+| SIG-02 | P1 | S/A | Signed packages with/without MsiDigitalSignatureEx | Capture exact signature streams, compute pre-hash P and content digest D; determine if native SignTool emits DSE. | Not run |
+| SIG-03 | P1 | S/A | Repack signed MSI with different sectors/order/timestamps | Keep logical stream bytes fixed; modify one metadata dimension per case. Compare basic vs extended signature validity. | Not run |
+| SIG-04 | P1 | S/A | Prefix-related stream names and names before/after DSE | Use valid signed fixtures; compute candidate stream sort orders and compare with Windows signature verification. | Not run |
+| SIG-05 | P1 | S/A | Nested storage containing signature-named stream; CLSID mutation | Vary nested data/name/CLSID independently; check signed digest and exclusion scope using native verifier. | Not run |
+| SIG-06 | P2 | S/A | RSA SHA-256/384/512, ECDSA where supported | Sign and verify each combination; document Windows build, certificate and algorithm-specific failures. | Not run |
+| INT-01 | P0 | S/A/I | Equivalent WiX and msitools packages | Pin version/commit; diff normalized table semantics, native open, install/uninstall and raw stream hashing. Identify producer-only decisions. | Not run |
+| INT-02 | P1 | S/A | WiX MSI round-tripped by libmsi and then native commit | Compare raw streams/decoded tables and native file extraction after each round trip; note semantic vs incidental changes. | Not run |
+| INT-03 | P1 | S/A | Minimized failures from msitools bug tracker | Run identical malformed input through native MSI API, msitools and independent CFB/CAB reader; distinguish bugs from Windows rejection. | Not run |
+
+### Suggested order and dependencies
+
+Start with `ENV-01`, `ENV-02`, `DB-01`, `CAB-01` and `RUN-01`; no malformed-input, signature or cross-implementation finding should be accepted without a working control. Run structural and API stages before the installation stage. Use a separate VM snapshot for each test that installs, upgrades, writes Registry keys, changes environment, starts a service, or modifies test-certificate trust.
+
+**Mapping to section 14 experiments:** W1=`CFB-07`; W2=`DB-08`/`SUM-03`; W3=`DB-05`; W4=`SUM-02`; W5=`RUN-03`/`RUN-04`; W6=`SIG-02`/`SIG-04`/`SIG-05`; W7=`RUN-01`; W8=`DB-07`; W9=`CAB-01`/`CAB-03`; W10=`CFB-03`/`DB-03`; W11=`SUM-03`/`SUM-04`; W12=`RUN-02`; W13=`RUN-07`.
+
+### Evidence guidelines and references
+
+Document native error codes as numeric values. For `MsiOpenDatabaseW` tests use an explicit read-only or transacted mode, close handles, and keep database read and installation conclusions separate. For invalid samples, prefer API-level tests before any `msiexec` execution. If a case needs unsupported Windows releases, large multi-GiB media, Arm64 guests or unavailable fixture sources, record **Blocked** with the exact missing prerequisite rather than guessing.
+
+- [MsiOpenDatabaseW](https://learn.microsoft.com/en-us/windows/win32/api/msiquery/nf-msiquery-msiopendatabasew) (opening modes); [MsiGetFileHashW](https://learn.microsoft.com/en-us/windows/win32/api/msi/nf-msi-msigetfilehashw) (native 128-bit file hash); [Template Summary](https://learn.microsoft.com/en-us/windows/win32/msi/template-summary) (language/platform syntax); [Windows Installer initialization errors](https://learn.microsoft.com/en-us/windows/win32/msi/initialization-errors) (native installer statuses).
+- Cross-reference the exact [WiX](https://github.com/wixtoolset/wix) and [GNOME msitools](https://github.com/GNOME/msitools) versions used; a difference between toolchains is not automatically a Windows Installer format requirement.
