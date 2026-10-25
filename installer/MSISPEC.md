@@ -51,6 +51,8 @@ This is a language- and tool-independent reference for reading, writing, validat
 - **Unverified:** needs a repeatable native compatibility test.
 - **Recommended:** an optional interoperable or deterministic output profile, not a Windows Installer mandate.
 - **Source (WiX / msitools):** read in that producer's source code at a pinned commit (section 17.6); describes the producer and the engine facts its authors relied on, not a universal requirement.
+- **Observed (Windows, wine):** asserted by a conformance test in Wine's `dlls/msi/tests`, which the Wine project runs against the native engine on Windows; such facts carry **(wine)**. A `todo_wine` assertion counts the same way: it records what Windows does and Wine does not yet.
+- **Source (wine):** read in Wine's `dlls/msi` engine code at the pinned commit (section 17.6); describes how a reimplementation that passes those tests does it, which is evidence about `msi.dll` only where a test backs it; such facts carry **(wine source)**.
 
 MUST, SHOULD and MAY use RFC 2119 terminology only within the declared scope of a rule. Successful parsing, successful native API opening and successful installation are distinct conformance levels. A reference writer's deterministic bytes do not define the only valid encoding.
 
@@ -60,6 +62,7 @@ MUST, SHOULD and MAY use RFC 2119 terminology only within the declared scope of 
 - [GNOME msitools](https://github.com/GNOME/msitools): portable MSI database reading/writing through libmsi, based on a subset of Wine's implementation.
 - [WiX Toolset](https://github.com/wixtoolset/wix): producer-specific MSI authoring, binding, validation and native MSI database interoperability.
 - Source reading: WiX at commit 53215fc (2026-10-24, MS-RL) and msitools at 8deb133 (2026-10-24, LGPL-2.1 / GPL-2.0) were read for behaviour, not copied; section 17.6 lists the files and such statements carry **(source)**.
+- [Wine](https://gitlab.winehq.org/wine/wine) `dlls/msi` at commit e3c3d34 (2026-10-22, LGPL-2.1): its `tests/` directory is the largest public body of assertions about what the native engine does, because the Wine project runs those tests on Windows to learn the behaviour it has to reproduce. The tests were read for the facts they assert (**(wine)**), the engine code for mechanism (**(wine source)**); nothing was copied (section 14, Independence). The tests run with a basic or no UI, elevated, mostly on en-US x86 and x64 Windows; UI, Arm64 and policy behaviour are outside their reach.
 - Native Windows msi.dll, msiexec.exe and cabinet.dll: investigation targets; identifying exports does not prove internal algorithms.
 
 Earlier reference hashes and toolchain output comparisons are retained as historical evidence, but should not be promoted to universal requirements without identifying sample hashes, versions and reproduction steps.
@@ -212,6 +215,13 @@ String words: `sN` 0x0D00 + N, `SN` 0x1D00 + N, `lN` 0x0F00 + N, `LN` 0x1F00 + N
 - 0 is NULL for every kind and MUST NOT appear in non-nullable columns. int16 stores `(v + 0x8000) & 0xFFFF` (−32767…32767); int32 stores `v XOR 0x80000000` (±2147483647). So `Media.DiskId = 1` is `01 80` and `LastSequence = 3` is `03 00 00 80`.
 - A binary column stores 1; its bytes live in stream `Table.Key1[.Key2…]` (integer keys in signed decimal), e.g. `Icon.app.ico`. Write one per non-NULL value. The decoded name is limited to 62 characters (source: the `msi.dll` limit WiX checks before writing a stream), which is the 31-unit encoded limit for names made of alphabet characters.
 
+What the native database API does with these structures (wine):
+
+- `_Tables`, `_Columns`, `_Streams` and `_Storages` cannot be created as tables; `_Properties` can. `_Streams` and `_Storages` present themselves as `Name s62`, `Data V0`; a row read from `_Storages` returns `ERROR_INVALID_DATA` for its data, and inserting into `_Storages` creates a sub-storage with that name. Deleting a `_Streams` row while a record still holds the stream leaves the record readable but empty.
+- Rows of `_Tables` and `_Columns` come back in string-ID order, that is in the order the names were first created, not alphabetically; rows of other tables come back in the order of their stored keys, which for string keys is string-ID order, not alphabetical (`test_rows_order`, `test_tables_order`). Rows inserted as temporary are not persisted by a commit.
+- A string of 0x10005 bytes round-trips through the pool, so the long-entry layout above is what the engine writes. Column declarations `SHORT`, `INT` and `INTEGER` persist as `i2`, `LONG` as `i4`; an empty string written into a non-nullable integer column fails with `ERROR_FUNCTION_FAILED`. Inserting a `Binary` row whose stream name exceeds the limit above succeeds in the transaction and fails at commit; inserting the same primary key twice fails with `ERROR_FUNCTION_FAILED`.
+- A transform applied with `MSITRANSFORM_ERROR_VIEWTRANSFORM` exposes its changes as the temporary table `_TransformView` (`Table`, `Column`, `Row`, `Data`, `Current`, all `g0`/`G0`): one row per changed cell, `INSERT`/`DELETE`/`CREATE` pseudo-columns for whole rows and tables, and a column row carrying the new column's type word as `Data` (`test_try_transform`). A transform can add a `Property` row that the package then sees as a property, which is how `TRANSFORMS=` on the command line changes a package (`test_transformprop`).
+
 Canonical writer:
 
 1. Validate the schema; turn empty strings into NULL; check nullability, ranges and string widths.
@@ -229,6 +239,7 @@ Both toolchains write a database through `msi.dll` or libmsi by importing one te
 - The pseudo table `_ForceCodepage` sets the database code page: two empty lines, then `<codepage>\t_ForceCodepage`. It MUST be imported before any table, or the tables are stored in the wrong code page (source).
 - The pseudo table `_SummaryInformation` has columns `PropertyId i2` and `Value l255`; times are written as `yyyy/mm/dd hh:mm:ss`.
 - Binary columns name a file in the archive's directory; WiX imports those rows through records instead, because `msi.dll` copies the files otherwise (source).
+- The native importer (wine): accepts integer widths `i0`, `i1`, `i2` and `i4` and rejects `i3`, `i5` and `i8`; stores a type line's `s0`/`S0` as unbounded and `l`/`L` as localizable; rejects a value that contains a raw LF, and turns the pair 0x11 0x19 into CRLF and 0x19 alone into LF on export; accepts CR inside a table name but not inside a column name; writes the `_ForceCodepage` export as `\r\n\r\n<cp>\t_ForceCodepage\r\n`, accepts code page 850 and rejects 9999 (`ERROR_FUNCTION_FAILED`); imports `_SummaryInformation` into the property set rather than as a table, with `PropertyId i2`, `Value l255`, times as `yyyy/mm/dd hh:mm:ss`, so that fourteen rows give fourteen summary properties of the right VT.
 
 A transform (`.mst`) is a compound file with CLSID `{000C1082-…}` whose table streams hold rows to insert, change or delete, plus its own `_StringPool` and `_StringData` (source: libmsi's reader; informative, as a producer of plain packages writes no transforms):
 
@@ -291,9 +302,16 @@ These are format and integrity requirements for a conforming, lossless serialize
 
 Test vector (chapter 03 §9): an x64 package with 14 properties, code page 1252, both times 2026-01-01T00:00:00Z (0x01DC7AB192810000). The stream is 520 bytes, SHA-256 `d7d1ae3fb5d0e6e3adba2ee946db5f6d3494d56cf9e089a8b7f39212e5c4a83e`. Other file kinds: chapter 03 §6–§7.
 
+How the engine validates Template and Page Count when it opens a package (wine, `test_package_validation`; mechanism wine source):
+
+- Template `""`, `";"`, `"Intel"`, `"Intel;"` and `"Alpha,,Intel;"` all open on x86 and x64: the platform part is a comma list and the first recognised token wins, so unknown tokens before a known one are harmless. A list with no recognised token (`"0"`, `"Intel32"`, `"Intel64"` on x86 or x64, `"Alpha"`) fails with 1633 `ERROR_INSTALL_PLATFORM_UNSUPPORTED`. A missing Template property is accepted. Tokens are compared exactly in Wine; whether `msi.dll` ignores case is unverified.
+- `"Intel,9999;1033"` opens; `"Intel;9999"` fails with 1623 `ERROR_INSTALL_LANGUAGE_UNSUPPORTED`; `"Intel;9"` and `"Intel;1024"` open on en-US: a language whose primary or sub-language is neutral is completed from the system default before the installed-locale check, and the first installed language of the list is enough.
+- `"x64;0"` with Page Count 100 fails with 1620 `ERROR_INSTALL_PACKAGE_INVALID`; with 200 it opens on 64-bit Windows and fails with 1633 on 32-bit Windows. Wine's platform check accepts `x64` on Arm64 hosts and rejects `Intel64` everywhere (wine source), consistent with the reports in section 8.2.
+- The summary API refuses to set properties on a handle opened with update count 0 (`ERROR_FUNCTION_FAILED`), rejects a VT that does not match the PID (`ERROR_DATATYPE_MISMATCH`: `PID_CODEPAGE` takes VT_I2 only, string PIDs VT_LPSTR only, FILETIME PIDs VT_FILETIME only), and a package's own summary stream cannot be changed from a running custom action. Reading a PID the stream lacks succeeds with VT_EMPTY.
+
 Unverified:
 
-- Acceptance of summary code page 1200 and of VT_LPWSTR (65001 fails: above); minimum Page Count for `Arm`; case of platform tokens.
+- Acceptance of summary code page 1200 and of VT_LPWSTR (65001 fails: above); minimum Page Count for `Arm`; case of platform tokens in `msi.dll` (Wine compares exactly).
 - Page Count for versions 1.0–1.2 and 4.0, and for values below 100; patch Word Count above 5.
 - Transform and patch formats (Revision Number spacing, `:` in transform lists, absent Word or Page Count, platform flag 0x0004); merge-module GUID format.
 
@@ -357,6 +375,14 @@ Each `ab` is `43 4B` ("CK") plus a raw RFC 1951 stream. Its last block has BFINA
 - A cabinet set that continues a file across cabinets needs consecutive `DiskId` values, in order, or the engine fails with error 2350, "FDI server error" (source). A producer need never write such sets.
 - "Smart cabbing" (source): WiX adds a second copy of identical content as an empty entry, flushes the folder first, and then patches the cabinet header so the duplicate's `cbFile`, `uoffFolderStart` and `iFolder` equal the original's while its own date, time and attributes stay. Files count as identical when their sizes and `MsiFileHash` values match. Readers MUST accept such entries (section 5 above); a writer that does this MUST keep the two files' own metadata.
 - WiX stores each file's last-write time converted to local DOS time, falls back to the creation time, and then to 1980-01-01 (source). A package built that way differs between time zones; the UTC rule above avoids that.
+
+How the engine picks and opens media (wine, `test_continuouscabs`, `test_caborder`, `test_mixedmedia`, `test_samesequence`, `test_missingcab`, `test_cabisextracted`; mechanism wine source):
+
+- The Media row for a file is the first row, in `DiskId` order, whose `LastSequence` is at least the file's `Sequence`. The `L_prev < Sequence ≤ L` rule above therefore holds only when `LastSequence` grows with `DiskId`; a row set `(1, 10), (2, 12), (3, 2)` puts sequence 2 on disk 1, not disk 3.
+- `Media.Cabinet` names the cabinet file; the name inside the cabinet set is not consulted. A row naming `test2_.cab` while the file is `test2.cab` fails the install, and a file placed in a cabinet other than the one its Media row names, or out of sequence order inside its cabinet, fails with 1603 `ERROR_INSTALL_FAILURE`.
+- A package may mix compressed files (attribute 16384) and uncompressed files (attribute 0 or 8192) under one Media row; `Media` columns are accepted as `i2 i4 L64 S255 S32 S72`. Two files sharing one `Sequence` both install.
+- A cabinet is opened only when a file in it has to be installed: a missing cabinet whose files belong to components with a false condition does not fail the install. An external cabinet that cannot be found at the source, in the published source list or at the base URL fails with 1603; an embedded cabinet (`#`) needs no source check.
+- A spanned cabinet set (a cabinet continued into the next) installs when the `DiskId` values are consecutive and in order (`test_continuouscabs`), which is the rule stated above.
 
 ### Determinism and test vectors
 
@@ -438,8 +464,8 @@ Validators (ICE03, ICE06, ICE32) read `_Validation`, the installer does not, and
 - The syntax of `KeyFormatted` and `URL`. (32 columns is the engine limit: section 3.)
 - Whether the toolchain writes `Patch.Sequence` as `i4` (no sample).
 - What to write when an `MsiFileHash` word is 0x80000000 (default: omit the row).
-- Handling of malformed registry `#` values (builders SHOULD reject them).
-- An `Environment` name with no prefix character (assumed `=-`).
+- Handling of malformed registry `#` values (builders SHOULD reject them; Wine's engine reads the digits it finds and stores 0 for none, wine source).
+- An `Environment` name with no prefix character behaves as `=-` (wine, section 8.13); not re-verified on current Windows.
 
 ### 6.5 `MsiFileHash` identity and hash provenance
 
@@ -484,6 +510,7 @@ The internal UI is pure data: UI-sequence rows open dialogs, dialogs hold contro
 - A style tag MUST start the text; otherwise `DefaultUIFont` applies. ScrollableText holds raw RTF and is never formatted.
 - Dialog bits: Visible 1, Modal 2, Minimize 4, SysModal 8, KeepModeless 16, TrackDiskSpace 32. Then UseCustomPalette 64, RTLRO 128, RightAligned 256, LeftScroll 512, Error 65536 (mask 0x000103FF). Seen values: 7 and 3 for pages, 5 for progress, 23 for files in use, 39 for feature selection, 65543 for errors (observed).
 - Control bits: Visible 1, Enabled 2, Sunken 4, Indirect 8, Integer 16, RTLRO 32, RightAligned 64, LeftScroll 128. Bits from 0x10000 up differ per type, such as NoPrefix 0x20000 on Text.
+- Event order on one control (wine, `test_controlevent`): `SpawnDialog`, `NewDialog` and `EndDialog` run after every other event of the control whatever their `Ordering`, so a `DoAction` with a higher `Ordering` than a `SpawnDialog` still runs first; and when several dialog events are on one control, only the one with the highest `Ordering` happens, which is rule 4 above. A child dialog that ends with `EndDialog Exit` ends the whole sequence with 1602.
 
 ### 7.3 End dialogs
 
@@ -562,6 +589,15 @@ Static package validation and Windows runtime tests verify different properties.
 - A dual-scope package decides at run time from `ALLUSERS` and `Privileged` (source: WixUI_Advanced): type-51 actions before CostFinalize compute a per-user folder (`[LocalAppDataFolder]Apps\<name>`) and a per-machine one (`[ProgramFilesFolder]<name>` or the 64-bit folder), and the install folder takes the per-user value when `ALLUSERS=""` or `ALLUSERS=2 AND NOT Privileged`, and the per-machine value when `ALLUSERS=1` or `ALLUSERS=2 AND Privileged`. A scope page then sets `ALLUSERS` to `{}` or `1` and the folder property through control events.
 - Per-user rollback is incomplete (reported, WiX issue 8574, open): when a deferred action fails after `PublishProduct`, the rollback of `PublishProduct` cannot delete the `HKU\<SID>\Software\Microsoft\Installer\Products\…\SourceList` values (errors 1402, 1403), so the product stays in Apps & features while nothing is installed, and uninstall, repair and upgrade all fail until the registry is cleaned by hand. Schedule deferred actions that can fail before `RegisterProduct`, right after `InstallInitialize` or `InstallFiles`.
 
+What the engine sets and does at package open (wine, `test_installprops`, `test_allusers_prop`, `test_mixed_package`, `test_wow64`, `test_register_product`; mechanism wine source):
+
+- `ALLUSERS` unset, `1` or `2` all install in an elevated session; `2` is rewritten to `1` before the sequence starts, so a condition `ALLUSERS=1` is true for a package whose `Property` table says `2`. The install context is the one the product is already registered in, else per-machine for `1`/`2` and per-user otherwise; Wine sets `Privileged`, `AdminUser` and `MsiRunningElevated` to `1` in that case (wine source).
+- `UILevel` is `2` for no UI, `3` basic, `4` reduced, `5` full; a component condition `UILevel=5` is false under `/qb`. `DATABASE` and `OriginalDatabase` hold the full path of the opened package; `VersionNT` is `major × 100 + minor`; `Installed` is set on every maintenance run, including those started through `MsiConfigureProductEx`, so a type-19 action under `Installed AND NOT REMOVE` fails only the second install (`test_installed_prop`).
+- On 64-bit Windows, `Intel` is set (to `0` on native Arm64), and `MsiAMD64`, `Msix64` and `VersionNT64` are set; `SystemFolder` is `SysWOW64`, `System64Folder` is `System32`, `ProgramFilesFolder` is the x86 folder. On 32-bit Windows the 64-bit variants are empty. An `x64` package resolves `SystemFolder` to the real `System32` (`test_wow64`).
+- Component attribute 256 (64-bit) selects the 64-bit registry view and attribute 4 (registry key path, no 256) the 32-bit view, in a package with Template `x64` **and** in one with Template `Intel` (`test_mixed_package`): the bit, not the platform token, chooses the view. This settles the item left unverified in earlier versions.
+- `RegisterProduct` writes `HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\{ProductCode}` in the 32-bit view for an `Intel` package and in the 64-bit view for an `x64` package (never both), with `DisplayName`, `DisplayVersion`, `InstallDate` (`yyyymmdd`), `InstallSource` (the source directory), `ModifyPath` and `UninstallString` (`MsiExec.exe /X{ProductCode}`), `Publisher`, `Language`, `Version` (`major << 24 | minor << 16 | build`), `VersionMajor`, `VersionMinor`, `WindowsInstaller 1`, `NoModify 1` and `EstimatedSize`, plus empty strings for the `ARP*` properties the package did not set; the same values go to `…\Installer\UserData\<SID or S-1-5-18>\Products\<squashed ProductCode>\InstallProperties` together with `LocalPackage`, the cached copy. The upgrade code is registered as value `<squashed ProductCode>` under `…\Installer\UpgradeCodes\<squashed UpgradeCode>` and removed on uninstall (`test_remove_upgrade_code`). GUIDs are "squashed" by reversing each hex group and dropping braces and dashes.
+- `PublishProduct` writes `Installer\Products\<squashed>` with `ProductName`, `PackageCode` (squashed package GUID), `Language`, `Version`, `Assignment` (`0` per-user, `1` per-machine), `AdvertiseFlags 0x184`, `InstanceType 0`, `AuthorizedLUAApp 0`, `Clients` (`:`) and a `SourceList` with `LastUsedSource`, `PackageName`, `Net\1` (the source directory) and `Media\1` (`DISK1;`) (`test_publish_product`). An `Icon` row's stream is written to `%AppData%\Microsoft\Installer\{ProductCode}\<name>` per-user and `%WINDIR%\Installer\{ProductCode}\<name>` per-machine, and removed on uninstall (`test_icon_table`).
+
 ### 8.3 Directory resolution (CostFinalize)
 
 1. A row whose key names a set, non-empty property takes that value. This covers the 27 system folders and command-line values.
@@ -572,6 +608,14 @@ Static package validation and Windows runtime tests verify different properties.
 - Source paths follow only the parent chain and the source part of DefaultDir. Short names apply when `SHORTFILENAMES` is set or the volume lacks long names. Per-user installs on Windows 7+ put both Program Files properties at `%LOCALAPPDATA%\Programs`.
 - Write `[INSTALLDIR]bin\app.exe`, never `[INSTALLDIR]\bin\app.exe`. A user-changeable directory key MUST be public and secure. Set it by type 51 before CostFinalize or type 35 after.
 
+Observed resolution details (wine, `test_settargetpath`, `test_sourcedir`, `test_shortlongsource`, `test_setdirproperty`, `test_sourcedirprop`, `test_source_resolution`; mechanism wine source):
+
+- `TARGETDIR` resolves, in order, to the location the product is already registered at, to the `TARGETDIR` property if set, else to `ROOTDRIVE`. Every other row takes its own property when set before CostFinalize, else parent path plus target name. A type-51 action before CostFinalize that sets a directory key to `[CommonFilesFolder]msitest\` moves the whole subtree there.
+- `MsiSetTargetPath` normalizes: doubled backslashes collapse, leading and trailing spaces of each component go, a trailing backslash is added, and all children are re-resolved (`C:\\one\\two  ` → `C:\one\two\`, `C:\\ Program Files \\ ` → `C:\Program Files\`). A path on a drive that does not exist fails with `ERROR_DIRECTORY`; the target directory itself need not exist and is not created by the call.
+- `SourceDir` and `SOURCEDIR` are both empty through CostInitialize, FileCost and CostFinalize. `ResolveSource` sets both to the directory of the package (`OriginalDatabase`), and so does any action that needs a source path, among them `ProcessComponents` and `InstallFiles`; calling `MsiGetSourcePath` after CostInitialize sets them too, while before CostInitialize it fails with `ERROR_DIRECTORY` and sets nothing. `SourceDir` is case-sensitive: `SoUrCeDiR` is a different, empty property. A type-51 action that sets `SourceDir` (for example to `[SRCDIR]` from the command line) redirects where files are read from. The execute sequence starts with `SourceDir` cleared (wine source), which is why a UI-sequence value does not carry over.
+- Source sub-directory names follow Word Count bit 0x1, not the disk: a package with long names uses the long part of `short|long` for its source path, a short-name package the short part, whichever of the two directories exists and whenever it is created (`test_shortlongsource`). When the file is not at the resolved source path the install fails with 1603 (`test_sourcefolder`).
+- `PrimaryVolumePath`, `PrimaryVolumeSpaceAvailable`, `PrimaryVolumeSpaceRequired` and `PrimaryVolumeSpaceRemaining` are unset before CostFinalize and set by it when `PRIMARYFOLDER` names a Directory key (`test_volume_props`).
+
 ### 8.4 Components and key paths
 
 The component code is machine-wide: one GUID is one component in every package. A null ComponentId is never registered, repaired or removed. The key path is a File key, a Registry key (bit 4), an ODBCDataSource key (bit 32) or null (the folder).
@@ -581,12 +625,30 @@ The component code is machine-wide: one GUID is one component in every package. 
 - Empty-folder components need `CreateFolder` (ICE18); advertised entry points need a file key path (ICE19). Profile data and non-advertised shortcuts need an HKCU key path (ICE38, ICE43).
 - Attributes: LocalOnly 0, SourceOnly 1, Optional 2 (3 is invalid), SharedDllRefCount 8, Permanent 16, Transitive 64, NeverOverwrite 128, 64bit 256. Services MUST be LocalOnly.
 
+Observed component behaviour (wine, `test_remove_files`, `test_shared_component`, `test_states`, `test_removefiles`; mechanism wine source):
+
+- A component with a null `ComponentId` installs but is never removed: at `REMOVE=ALL` its files stay, its `RemoveFile` rows for uninstall do not run, and its action state is "unknown" rather than absent. The engine only marks a component absent when a feature drops it **and** it has a GUID (wine source). Such a component also reports installed state unknown rather than absent.
+- A component shared by two products (same GUID) stays installed when the first product is removed and goes with the last; the engine keeps the client count in `Installer\UserData\…\Components` (`test_shared_component`).
+- `RemoveFile.InstallMode` 1 runs when the component is installed (local or source), 2 when it is removed, 3 both. A `SourceOnly` component's mode-2 and mode-3 rows run at uninstall even though it never was local. A row with a null `FileName` removes the directory named by `DirProperty` when it is empty; a directory with a leftover file survives and is removed by a later uninstall once empty. The `FileName` may carry a short name part, which is dropped.
+- A component in no feature ("dangler") has installed state absent and action state unknown after CostFinalize; `MsiSetComponentState` on it succeeds. A component whose own condition is false (`Condition` column) is disabled before feature processing and never gets an action.
+- The key path recorded for a registry key path is `NN:\key\name` with the root as two digits (`02:\Software\...`); for a file key path it is the file's target path; for no key path the component's directory (wine source).
+
 ### 8.5 Feature states
 
 - A first install selects a feature when 0 < Level ≤ `INSTALLLEVEL` (default 1); Level 0 disables it, even against `ADDLOCAL=ALL`. The Condition table changes Level, unless `Preselected` is 1.
 - Attributes: FavorLocal 0, FavorSource 1, FollowParent 2, FavorAdvertise 4, DisallowAdvertise 8, UIDisallowAbsent 16, NoUnsupportedAdvertise 32. Reject 4+8, 32+8 and 2+1.
 - Requests apply in the order `ADDLOCAL`, `REMOVE`, `ADDSOURCE`, `ADDDEFAULT`, `REINSTALL`, `ADVERTISE`, `COMPADD*`, `FILEADD*`. Any of them sets `Preselected`; never author them in the Property table.
 - Limits: key ≤ 38 characters, depth ≤ 16, 1600 components per feature on legacy systems. Only warn: real packages exceed it (observed). WiX refuses a package with more than 65536 components or a feature deeper than 16 (source).
+
+How CostFinalize turns requests into states (wine, `test_states`, `test_featureparents`, `test_feature_override`, `test_preselected`; the algorithm as Wine implements it, wine source, agrees with every non-`todo_wine` assertion):
+
+1. Feature and component states are "unknown" until CostFinalize; `MsiGetFeatureState` before it returns unknown for both installed and action (`test_states`), and `MsiGetComponentState` before FileCost fails with `ERROR_UNKNOWN_COMPONENT`.
+2. Component conditions are evaluated first; then installed states are read from the registry; then `ADDLOCAL`, `REMOVE`, `ADDSOURCE`, `REINSTALL` and `ADVERTISE` are applied in that order (`ALL` or a comma list of exact feature names), each later property overriding the earlier for a feature named in both; `REMOVE` sets absent only for installed features, `REINSTALL` keeps the installed state. If any of them was set, `Preselected` becomes `1` and the `Condition` table is not evaluated; otherwise `Condition` rows with a true condition replace the feature's level (`test_feature_override`: a `Condition` row `NOT Preselected AND NOT REMOVE` with level 0 switches a feature off on a plain install and on when a type-51 action sets `Preselected=1` before costing).
+3. A feature is selectable when `0 < Level ≤ INSTALLLEVEL` (`INSTALLLEVEL` defaults to 1 and is set to `1` if absent). A selectable feature without a request defaults to local, or to source with FavorSource (1), or to advertised with FavorAdvertise (4). A feature whose parent is not selectable takes the parent's level and becomes unknown, recursively; FollowParent (2) copies the parent's action.
+4. A component's action: with any local feature → local; else any source feature → source; else any advertised feature → advertised. A non-Optional component with a local or source feature is local, or source when it is SourceOnly. Optional (2) components follow the features: an Optional component shared by a local and a source feature is local, and becomes source when the local feature is set absent (`test_featureparents`). A component with a compressed file forces its feature from source to local (`test_states`, feature `three`).
+5. A component wanted by nobody becomes absent only if some feature of it is being removed and it has a `ComponentId`; otherwise unknown (section 8.4). A component already installed from source and requested from source again gets no action.
+
+Observed consequences: `ADDLOCAL=One` installs only that feature's components (`test_preselected`); a request to advertise a feature with DisallowAdvertise (8) makes it absent, with attribute 0 it is advertised (`test_featureparents`); a feature with `Level 101` and all its children are unknown at `INSTALLLEVEL 1`; a feature with `Level 0` stays unknown under every request property; `ADDLOCAL=ALL` on a product installed from source requests local for the FavorLocal and FavorSource features alike, and `ADDSOURCE=ALL` requests source for both, while a feature with a compressed file goes local in every case (`test_states`; the FavorAdvertise cases carry `todo_wine`). A `File` row whose component is not in the `Component` table does not stop the install on most Windows versions, while some return 1603, which the test skips as "broken result" (`test_missingcomponent`); a producer MUST NOT rely on either.
 
 ### 8.6 File versioning
 
@@ -598,6 +660,17 @@ The component code is machine-wide: one GUID is one component in every package. 
 - Unversioned files get no version; fonts get a null Language. A companion file (Version = another File key) follows its parent and is never a key path. WiX reads version and language with `MsiGetFileVersion`, the engine's own routine, lets the file's values win over authored ones, treats an authored `Version` that is not another File key as a companion-file mistake, and hashes only files that report no version (source).
 - Version checks on files under `SystemFolder` are unreliable on Windows 10 and later: `msiexec` is not manifested for those versions, so the version API returns the compatibility-shimmed numbers for OS files (reported, WiX issue 5824). Do not gate on the version of an OS DLL; test a registry value or `VersionNT`/`WindowsBuild` instead.
 - `REINSTALLMODE` (default `omus`): `p` missing, `o` older, `e` equal or older, `d` different, `a` all, `c` checksum. Then `u` user registry, `m` machine registry, `s` shortcuts, `v` re-cache the package.
+
+The per-file decision as Wine's engine makes it, which its tests confirm for the common cases (wine source; `test_readonlyfile`, `test_file_in_use`, `test_cabisextracted`):
+
+1. A file of a component that is disabled or not going local is skipped. A file obsoleted by a patch is skipped.
+2. Missing on disk → install.
+3. The package file has a `Version`: read the disk file's version resource and compare all four fields; lower on disk → overwrite, else keep. A disk file without a version resource is tried as a font (`FontTitle`), whose version compares only its first two fields; otherwise fall through.
+4. Different size → overwrite. Same size and an `MsiFileHash` row: equal hash → keep without touching the source media, different → overwrite. No hash row → keep ("assume present").
+5. A component with NeverOverwrite (128) turns every "overwrite" into "skip".
+
+- A read-only file on disk is overwritten (`test_readonlyfile`). A file that is open for reading by another process is replaced through `PendingFileRenameOperations` and the install returns 3010 `ERROR_SUCCESS_REBOOT_REQUIRED` with `REBOOT=ReallySuppress`; the old bytes stay until the pending rename runs (`test_file_in_use`).
+- `MsiGetFileVersion` fails with `ERROR_FILE_INVALID` for a file without a version resource and with `ERROR_FILE_NOT_FOUND` for a relative path on Windows; its language string is the decimal LCID list (`test_MsiGetFileVersion`). `MsiGetFileHash` takes `dwOptions` 0 only and returns the four words the `MsiFileHash` table stores (`test_MsiGetFileHash`).
 
 ### 8.7 Properties
 
@@ -614,6 +687,14 @@ Precedence, high to low: OS-set values, command line, AdminProperties, transform
 - A raw registry search (`RegLocator.Type` 2) of a `REG_MULTI_SZ` value gives a property that begins and ends with a NUL. In a public property that value breaks the client-to-server hand-off, so later dialogs misbehave and the UI cannot uninstall (reported, WiX issue 1108). Search multi-strings only into private properties, or not at all.
 - A property set to `*` for `ProductCode` means "generate": toolchains replace it with a random GUID at build time (source); section 11.1 has a reproducible alternative.
 
+Property mechanics (wine, `test_props`, `test_property_table`, `test_command_line_parsing`, `test_propcase`, `test_customaction51`, `test_adminprops`; wine source):
+
+- Names are case-sensitive and compared exactly; `=`, a single space and `'` are accepted as property names; an empty name with a value fails with `ERROR_FUNCTION_FAILED`. Setting a property to NULL or `""` removes it, so "set but empty" does not exist and a name alone in a condition means "non-empty". `_Property` is the engine's own table and cannot be created by a package.
+- A type-51 action with an empty `Source` is a no-op, not an error; one whose `Target` is `[~]np` stores a value with an embedded NUL, while `MsiSetProperty` keeps `[~]` literal, so formatted text is evaluated only where the schema says `Formatted`.
+- Command line: `P=`, `P=""`, `P=""""` (a literal quote), `P="one two"`, `P="""one"" two"` (doubled quotes inside a quoted value), `P="one=two"` and `P="one""two"` are accepted; a bare `one`, `=`, `=one`, `P="` or any unbalanced quote fails with 1639 `ERROR_INVALID_COMMAND_LINE`; `P=one"` passes on Windows. Spaces around `=` are ignored; the value ends at the first unquoted space. `MyProp=42` on the command line sets the private property `MyProp` (`test_propcase`), so the public/private rule above is about which properties the server receives, not about parsing.
+- An administrative image's `AdminProperties` stream sets the listed properties at install (`test_adminprops`); `ACTION=ADMIN` runs `AdminExecuteSequence` and copies the files to `[TARGETDIR]` (`test_admin`).
+- Inside a custom action, the A-suffixed getters report sizes in bytes rather than characters for `MsiGetProperty`, `MsiGetTargetPath`, `MsiGetSourcePath` and `MsiFormatRecord`, a remoting artefact (`custom.c`); the W-suffixed ones are right. `INSTALLLEVEL` is readable as a property and `MsiSetInstallLevel` changes it.
+
 ### 8.8 Condition grammar
 
 ```
@@ -629,6 +710,27 @@ value = name | "%"env | "$"comp | "?"comp | "&"feat | "!"feat | "string" | digit
 - On integers `><` is bitwise AND and `<<`/`>>` compare the high/low 16 bits. On strings they test contains, starts with, ends with. An integer against a non-numeric string is false, except for `<>`.
 - Versions do not compare: `"1.10" > "1.9"` is false. Quote `REMOVE="ALL"`; it is reliable only after InstallValidate.
 
+Evaluation rules asserted by `test_condition` (wine; 760 lines, none `todo_wine`), with Wine's grammar as the model (wine source):
+
+| Operands | Rule | Examples (true unless noted) |
+|---|---|---|
+| None | NULL, `""` and `" "` give "no condition", which a sequence treats as true | — |
+| Integer literal alone | non-zero is true | `-1`, `1`; `0` false |
+| String literal alone | non-empty is true, whatever it says | `"0"`, `"abc"`; `""` false |
+| Property alone | set (non-empty) is true; `1 AND ""` is false | — |
+| Integer vs integer | numeric | `3 >< 1` (bitwise AND) |
+| Integer literal vs string literal | always false, except `<>` | `1 = "1"`, `0 < "100"`, `100 > "0"` all false; `0 <> ""` true |
+| Property vs integer | the property's text is parsed as an optional `-` and digits; then numeric, else false except `<>` | `p=5`: `p = 5`, `p = "5"`; `p="0 "`, `"0asdf"`, `"--0"`, `"0x00"`, `"+0"`, `"0.0"` are strings; `"-0"` and `"0000000000000"` are 0 |
+| Property vs string, string vs string | ordinal (`wcscmp`) comparison, case-sensitive; `~` makes it case-insensitive | `"1" > "12"` false, `"100" < "21"`, `"2" < "1.1"` false, `"02.1" < "2.11"`; `a` + U+030A is not equal to U+00E5 (no Unicode normalization) |
+| Two properties or property vs literal, both all digits | numeric (`A="2"`, `X="50val"`: `A <= X` true as strings, `2 <= X` false) | — |
+| Unset property vs anything | the property is `""`: `p = 0` false, `p <> 0` true, `p < 0`, `p > 0`, `p >= 0`, `p <= 0` all false; `p < "anything"` true, `p >= "x"` false | — |
+| Substring operators on strings | empty right side → true; empty left side → false | `p >< ""` true; `"" << "a"` false |
+| `&`, `!`, `$`, `?` on an unknown feature or component | the value is NULL: `&nofeature` false, `&nofeature = ""` true, likewise `!`, `$`, `?` | — |
+| Syntax errors | `0 >=`, `~not`, `0 < > 0`, `==`, `IMP` alone, `!=`, unbalanced parentheses, an unterminated string | all `MSICONDITION_ERROR` |
+
+- The lexer treats `-` and `.` as number characters and `#`, `.` and digits as identifier characters after a letter, so `1.1` is a number token and `a.b` one identifier (wine source). Keywords `AND`, `OR`, `NOT`, `XOR`, `EQV`, `IMP` are case-insensitive; a `~` prefix is accepted before every relational operator.
+- `MsiEvaluateCondition` from a custom action gives `MSICONDITION_NONE` for NULL and evaluates `condprop = 1` against properties the action just set (`custom.c`).
+
 ### 8.9 Formatted-text grammar
 
 1. In Template columns, `[n]` becomes record field n.
@@ -637,6 +739,15 @@ value = name | "%"env | "$"comp | "?"comp | "&"feat | "!"feat | "string" | digit
 4. An unmatched `[` or `{` stays literal. `{{…}}` in Error messages goes only to the log.
 
 `[#file]` and `[$comp]` are empty before CostFinalize; `[!file]` is a short path only in `Registry.Value` and `IniFile.Value`. `[$comp]` is null for a component without an action, so cross-component references break (ICE69).
+
+Substitutions asserted by `test_formatrecord*` and `format.c` (wine; mechanism wine source):
+
+- `[prop]` of an unknown property, `[foo.$%}]` and `[100]` of a missing record field resolve to nothing; `[]` and `[-1]` stay literal. `[[1]]` resolves twice (`[1]` = `2`, field 2 = `hey` → `hey`); `[[3][1]]` concatenates the inner results (`1`, `2`) into the name `12` and then looks that field up.
+- `[\[]` → `[` and `[\x]` → `x`: one escaped character per bracket pair; `[\xabcd]` gives `x` and `[abcd\xefgh]` nothing. `[~]` gives a NUL, so `x[~]x` reads as `x` through the A API. Without a session (`MsiFormatRecord` on a record alone) these escapes are left as they are.
+- `[%ENV]` reads the process environment; `[%NOVAR]` is empty. `[#f]` and `[!f]` are empty before CostInitialize and the full target path after CostFinalize; `[$c]` is the component's directory, resolved against the source tree when the component's action is source (wine source).
+- Braces: `{text}` without a `[…]` inside stays, braces included (`{abcd}`, `{foo}`). `{[p]text}` becomes `vtext` when every property in it is set and nothing when one is missing; `{{[1]}}` is nothing and `{{a}}` is nothing. Nested groups and stray braces follow rules the tests pin down case by case (`{abc{d[one]ef}` keeps 14 characters, `{a{b}c}` stays, `{{a} }` stays); a producer SHOULD avoid nested braces altogether.
+- A format string with a syntax error (`[`, `{` or `}` unbalanced, `[1]}`) is copied through with the stray character kept, never rejected.
+- `MsiFormatRecord` without a session leaves `[prop]` and `{…}` with properties untouched, which is how the Template column is formatted for log messages; a numeric field whose value is itself `[2]` is not re-resolved (`[1]` with field 1 = `[2]` gives `[2]`).
 
 ### 8.10 Upgrades
 
@@ -656,6 +767,12 @@ value = name | "%"env | "$"comp | "?"comp | "&"feat | "!"feat | "string" | digit
 
 Prefer A or B. Minor upgrades install with `msiexec /i new.msi REINSTALL=ALL REINSTALLMODE=vomus`. Full detail: chapter 07 §10.
 
+What the engine does with the `Upgrade` table (wine, `test_find_related_products`, `test_remove_existing_products`, `test_upgrade_code`; wine source):
+
+- `FindRelatedProducts` does nothing when `Installed` is set, and nothing in the execute sequence when it already ran in the UI sequence: a second install of the same package, which would otherwise find itself, sets no `ActionProperty` (`test_find_related_products`). It enumerates the registered `UpgradeCodes\<squashed>` key, skips products not registered in any context, compares the registered `Version` DWORD against `VersionMin`/`VersionMax` with the inclusive bits, checks `Language` against the registered language (bit 1024 inverts), appends the product code to `ActionProperty` with `;` and never appends a code twice. A null `VersionMin` or `VersionMax` disables that bound (wine source). An `UpgradeCode` property that is not a GUID (`#UPGEADECODE#`) does not stop an install (`test_upgrade_code`).
+- `RemoveExistingProducts` skips rows with OnlyDetect (2) and rows whose `ActionProperty` is unset, formats the `Remove` column into `REMOVE=<features>` (`ALL` when null) and runs the removal of each listed product as a separate `msiexec /qn /i <product> REMOVE=…` and waits for it (wine source). A product code listed in `ActionProperty` from the `Property` table is enough to trigger a removal, which the ICE61 rule about pre-set action properties guards against.
+- `MigrateFeatureStates` only looks at rows with bit 1 and at the upgrade-code key of the install context (wine source).
+
 ### 8.11 Custom actions and transactions
 
 - Immediate actions run while the script is built and MUST NOT change the system. Deferred actions (bit 1024) run from the script, between InstallInitialize and InstallFinalize (ICE77).
@@ -673,6 +790,16 @@ What the engine gives a custom action, as WiX's helper library uses it (source):
 - The engine preserves no DLL state between calls, so every action starts from scratch (source). `MsiViewModify` with `INSERT_TEMPORARY` reports only `ERROR_FUNCTION_FAILED`; `VALIDATE_NEW` on the same record gives the detailed `MSIDBERROR` (source).
 - Type-51 property setting cannot be deferred: the engine rejects it, and WiX does too with "MSI doesn't support in-script property setting" (source). TS-aware actions MUST be deferred; async-no-wait is only for EXE actions (source).
 
+What Wine's engine does with custom actions, confirmed by its tests where noted (wine source; `test_deferred_action`, `test_customaction51`, `custom.c`, `action.c` cf/pp tables):
+
+- Standard actions that change the machine (`InstallFiles`, `CreateFolders`, `WriteRegistryValues`, `RegisterProduct`, …) do not run at their sequence position. During the sequence they only append themselves to the install script; the script runs at `InstallExecute`, `InstallExecuteAgain` or `InstallFinalize`. The tests pin this down: an immediate custom action right after `InstallFiles` sees the file absent and the folder not created, while a deferred action at the same position sees both present; likewise for `RegisterProduct`, `PublishFeatures`, `PublishProduct`, `RegisterUser`, `ProcessComponents` and their undo actions (`cf_*`, `pp_*` tables in `action.c`). An immediate action that wants to see the installed state MUST be sequenced after `InstallFinalize`.
+- A deferred, rollback or commit action is written into the script as its name plus a copy of `CustomActionData`, `UserSID` and `ProductCode` taken at that moment; when the script runs, those three are the only properties restored. `test_deferred_action` shows the order: a deferred action at sequence 700 runs after an immediate action at 800, because it runs from the script at `InstallFinalize`; it reads `CustomActionData` from the property a type-51 action set under its own name, plus `ProductCode` and `UserSID`, and `MsiGetMode(MSIRUNMODE_SCHEDULED)` is false in the immediate action and true in the deferred one. Rollback actions are executed in reverse order of scheduling; commit actions in order, after the install script. The rollback script does not run when `RollbackDisabled` is set (`DISABLEROLLBACK=1` sets it).
+- DLL return codes: 0, 1602, 1603, 259 and 1626 (`ERROR_FUNCTION_NOT_CALLED`, which a sequence treats as success) are passed through; 1604 (`ERROR_INSTALL_SUSPEND`) triggers an immediate `ForceReboot`; any other value is turned into 1603. An EXE action fails on any non-zero exit code unless Continue (64) is set. 259 is passed through as "no more items", which is how it ends an install successfully (section 9.4).
+- Scheduling options for immediate actions: FirstSequence (256) skips the action in the execute sequence when it ran in the UI sequence, OncePerProcess (512) skips it when it ran in the same process, ClientRepeat (768) runs it only when the UI sequence ran in the same process.
+- Type 19 fails the install with its formatted `Target` as the message; type 35 sets a directory through the same code as `MsiSetTargetPath`; a type-51 action that sets `SourceDir` also resets every resolved source folder; types 7 and 23 run a nested install and are deprecated.
+- A custom action may run further actions with `MsiDoAction` and whole custom sequence tables with `MsiSequence`; actions nested that way see the properties set by their caller (`test_doaction`). `MsiSetMode(MSIRUNMODE_REBOOTATEND)` succeeds from an immediate action and makes the install return 3010 (`test_misc`, `MSI_InstallPackage`).
+- `ForceReboot` registers `MsiExec.exe /@ "<squashed ProductCode>"` under `RunOnce` and `/I "{ProductCode}" AFTERREBOOT=1 RUNONCEENTRY="…"` under `Installer\RunOnceEntries`, then ends the install with 1604 (wine source).
+
 ### 8.12 Package consistency checklist (full list: chapter 07 §13)
 
 1. Emit one root `TARGETDIR` with DefaultDir `SourceDir`, and an 8.3 short name for every long name.
@@ -683,14 +810,28 @@ What the engine gives a custom action, as WiX's helper library uses it (source):
 6. Write launch conditions as `Installed OR …`, and run AppSearch first when they use its results.
 7. Use `*` in Environment rows of per-machine components, and extend `PATH` only with `[~]`.
 
+### 8.13 Table-driven writes as the engine performs them
+
+Registry, environment, service, folder and shortcut rows are applied by standard actions from the script (section 8.11). This is what they do, as Wine's conformance tests assert on Windows (wine; mechanism wine source).
+
+**Registry** (`test_write_registry_values`): `Value` prefixes `#123` → `REG_DWORD` (a leading `-` negates), `#x01234567` → `REG_BINARY` (an odd digit count is padded in front), `#%text` → `REG_EXPAND_SZ`, `##` → a literal `#` in a `REG_SZ`; any `[~]` in the value makes it `REG_MULTI_SZ` with `[~]` as the separator. A null `Name` writes the key's default value. `Name` `+` with a null `Value` creates the key and leaves it at uninstall; `*` creates the key and deletes it at uninstall; `-` never creates and deletes the key at uninstall. Multi-string merging with an existing value: `[~]a[~]` replaces, `[~]a` appends, `a[~]` prepends, each without duplicating strings already present; `[~]` alone empties the value; a `REG_SZ` already there is discarded. At uninstall, Windows removes only the strings the package appended or prepended and keeps the rest (`todo_wine`: Wine deletes the value). A very long key path with spaces in its components works. `RemoveRegistry` rows delete a value (or a whole key with `-`) when the component is installed; attribute 256 selects the 64-bit view (section 8.2).
+
+**Environment** (`test_envvar`): the `Name` prefix characters are `=` set always, `+` set only when absent, `-` remove at uninstall, `!` remove at install (when the value matches, or unconditionally with no value), `*` machine scope (`HKLM\System\CurrentControlSet\Control\Session Manager\Environment`, which also implies removal at uninstall); several combine, `=-` is the usual pair and a name with no prefix behaves as `=-`. The value `[~];x` appends `x` after a `;`, `x;[~]` prepends, `[~]x` or `x[~]` without the `;` is treated as no value, and `[~]` alone unsets. Observed outcomes: `+-X [~];1` on an absent `X` creates `1`, a second `+-X [~];2` row gives `1;2`; `=X ;1;` and `=X ;;1;;` store those literals, `=X  1 ` keeps the spaces; a prepend keeps empty segments (`;;2;;` before `1` → `;;2;;1`); an append of a value already present as a whole `;`-segment is skipped; a `-X 1` row never creates `X`; a `-X value` row with no `-`-free setter leaves the variable at uninstall when the existing value differs (`1` ≠ `2`) and removes it when it matches; a formatted value that comes out empty (`[bogus_prop]`) creates nothing; rows without `-` (`=X …`) survive uninstall. At uninstall, Windows removes only the appended or prepended segment and keeps the rest of a `PATH`-style value (`todo_wine`). WriteEnvironmentStrings runs for components going local or source, RemoveEnvironmentStrings for components going absent.
+
+**Services** (`test_install_services`, `test_start_stop_services`, `test_delete_services`; wine source): `InstallServices` creates each `ServiceInstall` row of a component going local with `CreateService`, image path = the component's key file plus a space and `Arguments`, `Description` through `ChangeServiceConfig2`; `Dependencies` is `[~]`-separated with a `+` prefix for a load-order group and ends with `[~][~]`; `ErrorControl` bit 0x8000 ("vital") is stripped before the call and decides whether a `CreateService` failure fails the install; a service that already exists is left alone; rows with StartType boot (0) or system (1) are skipped (wine source). An installed service is not deleted at uninstall by `InstallServices` alone; it needs a `ServiceControl` row with event 128 (`test_install_services`). `ServiceControl` events: 1 start, 2 stop, 8 delete at install (component local); 16 start, 32 stop, 128 delete at uninstall (component absent); stop stops dependents first, delete stops first; `Wait=1` waits at most 30 s for `SERVICE_RUNNING` and fails the action if it is not reached (wine source); a service that is already running is a success. A `ServiceControl` row can stop and start a service the package did not install (`Spooler` in the test).
+
+**Folders and files** (`test_create_remove_folder`, `test_remove_files`, `test_duplicate_files`, `test_move_files`): `CreateFolder` rows create their directory for components going local and `RemoveFolders` removes them when the component goes absent, the top directory included; `RemoveFiles` also removes the directories it emptied. `DuplicateFile` with a `DestFolder` that is not a known property creates the missing intermediate directories under the component's directory and copies the file there; `MoveFile` with a relative `SourceFolder` or `DestFolder` is treated as a network path and does nothing, wildcards move the first match in directory order, and a wildcard that matches a directory is not moved.
+
+**Shortcuts and icons** (`test_create_remove_shortcut`, `test_icon_table`; wine source): a `Shortcut.Target` containing `[` is formatted into a path, otherwise the row is an advertised shortcut and the component's key path is the target; `WkDir` names a Directory key; `Icon_` names an `Icon` row whose stream is written under the product's installer folder (section 8.2) and `IconIndex` null means 0; the `.lnk` is written to `[Directory_]Name.lnk` and removed at uninstall.
+
 ### Unverified (chapter 07)
 
 - Error 1638 when an installed ProductCode meets a different package code.
 - ALLUSERS values other than `""`, `1` and `2`; the result of Word Count bit 3 when elevation is needed.
-- That component bit 256 selects the 64-bit registry view (implied, not stated).
 - The MsiFileHash algorithm: Learn names none; toolchain packages match MD5 (chapter 05).
-- Negative literals, `IMP` associativity, bare literals, and comparing two numeric-looking properties.
+- `IMP` associativity and precedence (Wine parses `OR`, `IMP`, `XOR` and `EQV` at one level, left to right; Microsoft documents `Imp` lowest).
 - Whether placement A restores the old product when the new install fails, and the UAC token of impersonated deferred actions.
+- The multi-string registry and environment uninstall behaviour marked `todo_wine` above, on current Windows.
 
 ## 9. Actions and sequences
 
@@ -704,7 +845,8 @@ Install, administrative and advertise modes each have an execute table (IES, AES
 - `Sequence` 1 … 32767 runs in ascending order. Termination values −1, −2, −3 and −4 run on success, user exit, fatal error and suspend. 0, other negatives and NULL never run; do not emit them.
 - Each termination value is used once per table at most, by a dialog or custom action in a UI table. With a UI, ICE20 needs −1, −2 and −3 in IUS and AUS.
 - Positive numbers are unique per table (ICE82 warns) and at most 32767. By convention, standard actions use multiples of ten and custom actions do not.
-- A NULL condition runs the action; a syntax error fails the install. A deferred action's condition is evaluated once, while the script is built.
+- A NULL condition runs the action. A condition that does not parse is not a reliable stop: a `LaunchCondition` row with a syntactically invalid condition is ignored and only a false one fails the install with 1603 (wine, `test_launchconditions`), and Wine's sequencer runs an action whose condition fails to parse (wine source). Validate conditions at build time. A deferred action's condition is evaluated once, while the script is built.
+- Top-level flow (wine source, `test_top_level_action`): `INSTALL` runs `InstallUISequence` when the UI level is reduced or higher and the table has rows, else `ExecuteAction` directly; `ExecuteAction` reads `EXECUTEACTION` (default `INSTALL`, `ADMIN` selects the admin tables) and runs the execute sequence once per process; the termination row −1…−4 is looked up in the table of the sequence that ran (UI table with a UI, else the execute table). `ACTION=custom` with an unknown action fails the install (Windows; `todo_wine`). The execute sequence starts with `SourceDir` cleared.
 - `REMOVE="ALL"` is reliable only after InstallValidate. Feature and component state tests belong after CostFinalize.
 - ICE84: CostInitialize, FileCost, CostFinalize, InstallValidate, InstallInitialize, InstallFinalize, ProcessComponents, PublishFeatures, PublishProduct, RegisterProduct and UnpublishFeatures carry no condition in execute tables.
 - AppSearch, CCPSearch, RMCCPSearch, FindRelatedProducts and MigrateFeatureStates are skipped in IES when they ran in IUS. Author them in both.
@@ -761,6 +903,8 @@ For each table with at least one row, emit the forward and the reverse action:
 | `ODBC*`, `BindImage`, `IsolatedComponent`, `Patch` | InstallODBC + SetODBCFolders, BindImage, IsolateComponents (IUS too), PatchFiles | RemoveODBC | IES |
 | `LockPermissions`, `MsiLockPermissionsEx`, `ReserveCost`, `MsiFileHash`, `Media`, `Icon` | none of their own | — | — |
 
+The engine pairs each script action with the action that undoes it, and that pair is what rollback runs (wine source): CreateFolders/RemoveFolders, CreateShortcuts/RemoveShortcuts, DuplicateFiles/RemoveDuplicateFiles, InstallFiles/RemoveFiles, InstallServices/DeleteServices, StartServices/StopServices, InstallODBC/RemoveODBC, PublishComponents/UnpublishComponents, PublishFeatures/UnpublishFeatures, PublishProduct/UnpublishProduct, the Register…/Unregister… pairs for class, extension, MIME, ProgId, type library, font and COM+ information, SelfRegModules/SelfUnregModules, WriteEnvironmentStrings/RemoveEnvironmentStrings, WriteIniValues/RemoveIniValues, WriteRegistryValues/RemoveRegistryValues, MsiPublishAssemblies/MsiUnpublishAssemblies, and ProcessComponents with itself. `UnpublishProduct` exists for rollback only and runs at `InstallFinalize` when every feature is being removed.
+
 Refinements from WiX's own table-to-action rules (source): any `Component` row at all brings CreateFolders and RemoveFolders; `Registry` or `RemoveRegistry` rows bring both WriteRegistryValues and RemoveRegistryValues; `DuplicateFile` rows require InstallFiles even without `File` rows; `Font` rows come from files with a font title, `SelfReg` and `BindImage` from file flags; `Upgrade` rows add MigrateFeatureStates only when one of them migrates features; an `AppSearch` row ensures the `Signature` table, a `ProgId` row the `Extension` table, and a `Dialog` row the `ListBox` table, all possibly empty.
 
 Ordering checks after numbering (ICE27; full list in chapter 08 §2.3). Before/after numbering is in section 11.7.
@@ -805,7 +949,7 @@ Reference validation checks (profile-specific; chapter 08 §5.5, §5.10):
 - AdvtES accepts only types 19, 35 and 51 (ICE72). Type 35 follows CostFinalize; a type 51 that sets a directory precedes it (ICE12).
 - Immediate types 17, 18, 21 and 22 follow CostFinalize (ICE75), and InstallFinalize if the file is not yet installed. Nested installs are deprecated, conditioned and synchronous.
 - A deferred action `X` reads `CustomActionData` from a property `X`, usually set by a type-51 action before it. Common sums: deferred 1024, rollback 1280, commit 1536, elevated deferred 3072.
-- DLL return codes: 0 success, 1602 user exit, 1603 failure, 259 ends the install successfully without the remaining actions (source: WiX relies on it, section 8.11). Any EXE exit code but 0 fails unless Continue is set.
+- DLL return codes: 0 success, 1602 user exit, 1603 failure, 259 ends the install successfully without the remaining actions (source: WiX relies on it, section 8.11). Any EXE exit code but 0 fails unless Continue is set. Wine's engine additionally passes 1626 through as success, maps 1604 to a forced reboot and every other value to 1603 (wine source, section 8.11). A type-51 action with a null `Source` is a no-op (wine).
 
 ### 9.5 ICE and consistency validation rules
 
@@ -1230,6 +1374,7 @@ Unchanged (obs): `_Validation` rows (four descriptions differ only in whitespace
 | cabinet.dll FCI / FDI | Cabinet compression and decompression interoperability | CAB acceptance does not establish valid MSI media sequencing |
 | GNOME msitools / libmsi | Portable independent MSI reader/writer and negative fixtures | Partly derived from Wine, not authoritative Windows runtime |
 | WiX Toolset | Real producer output and Windows MSI interop | Default values and algorithms may be toolchain-specific |
+| Wine `dlls/msi` and its tests | Conformance tests run against the native engine on Windows (facts marked **(wine)**); an engine reimplementation that passes them (**(wine source)**) | Tests cover basic-UI, elevated, en-US x86/x64 runs; `todo_wine` marks what Windows does and Wine does not; engine code is a model, not `msi.dll` |
 
 ### Native experiments
 
@@ -1475,6 +1620,8 @@ WiX at `53215fc427b48005770d6814d9e6a48c048907ee` (2026-10-24, MS-RL), under `sr
 
 msitools at `8deb133` (2026-10-24, LGPL-2.1 for libmsi, GPL-2.0 for the tools): `libmsi/{string,table,libmsi-database,libmsi-summary-info}.c`; `tools/wixl/{builder,msi,msi-default,util}.vala`.
 
+Wine at `e3c3d34` (2026-10-22, LGPL-2.1), `dlls/msi` only. Tests, for the facts marked **(wine)**: `tests/package.c` (`test_condition`, `test_props`, `test_property_table`, `test_formatrecord2`, `test_formatrecord_tables`, `test_states`, `test_featureparents`, `test_settargetpath`, `test_removefiles`, `test_appsearch_reglocator`, `test_installprops`, `test_launchconditions`, `test_shortlongsource`, `test_sourcedir`, `test_MsiGetSourcePath`, `test_emptypackage`, `test_controlevent`, `test_top_level_action`); `tests/db.c` (`test_longstrings`, `test_streamtable`, `test_binary`, `test_suminfo_import`, `test_msiimport`, `test_try_transform`, `test_integers`, `test_special_tables`, `test_tables_order`, `test_rows_order`, `test_collation`, `test_stringtable`, `test_carriagereturn`, `test_forcecodepage`, `test_storages_table`, `test_embedded_nulls`); `tests/install.c` (`test_packagecoltypes`, `test_continuouscabs`, `test_caborder`, `test_mixedmedia`, `test_samesequence`, `test_readonlyfile`, `test_setdirproperty`, `test_cabisextracted`, `test_transformprop`, `test_currentworkingdir`, `test_admin`, `test_adminprops`, `test_missingcab`, `test_sourcefolder`, `test_customaction51`, `test_missingcomponent`, `test_sourcedirprop`, `test_propcase`, `test_preselected`, `test_installed_prop`, `test_allusers_prop`, `test_file_in_use`, `test_feature_override`, `test_icon_table`, `test_package_validation`, `test_upgrade_code`, `test_mixed_package`, `test_volume_props`, `test_shared_component`, `test_remove_upgrade_code`, `test_deferred_action`, `test_wow64`, `test_source_resolution`); `tests/action.c` (`test_register_product`, `test_publish_product`, `test_publish_features`, `test_register_user`, `test_remove_files`, `test_move_files`, `test_duplicate_files`, `test_write_registry_values`, `test_envvar`, `test_create_remove_folder`, `test_start_stop_services`, `test_delete_services`, `test_install_services`, `test_create_remove_shortcut`, `test_find_related_products`, `test_ini_values`, `test_remove_existing_products`); `tests/custom.c`; `tests/format.c` (`test_formatrecord`); `tests/suminfo.c` (`test_suminfo`); `tests/msi.c` (`test_MsiGetFileHash`, `test_MsiGetFileVersion`, `test_command_line_parsing`). Engine code, for the facts marked **(wine source)**: `cond.y`, `format.c`, `custom.c`, `package.c`, `action.c`, `install.c`, `files.c`, `media.c`, `upgrade.c`, `appsearch.c`, `msiquery.c`.
+
 No code from these files appears in this document (section 14, Independence).
 
 ## 18. Reference chapters
@@ -1540,6 +1687,10 @@ Every pitfall below has cost someone an install on a customer's machine. Each ro
 | Raw `REG_MULTI_SZ` search into a public property | Later dialogs misbehave; UI cannot uninstall | **static:** `RegLocator.Type` 2 on a public property is a warning | 8.7 |
 | Version check on a file under `SystemFolder` | Wrong result on Windows 10+ | **static:** warn on `Signature.MinVersion` for files in system folders | 8.6 |
 | Empty `Feature.Level`, feature depth over 16, more than 65536 components | Crash or refusal at build, or engine limits | **static:** defaults applied; counts checked | 8.5 |
+| Component without `ComponentId` carrying files that must go at uninstall | Files and `RemoveFile` rows stay behind after `REMOVE=ALL` (wine) | **static:** every component with files or registry values has a GUID unless it is meant to be permanent | 8.4 |
+| `Media` rows whose `LastSequence` does not grow with `DiskId`, or a `Cabinet` name that differs from the file name | File taken from the wrong cabinet, or 1603 (wine) | **static:** `LastSequence` strictly increasing by `DiskId`; external cabinet files present under the exact `Cabinet` name | 5 |
+| Environment `-` row whose value differs from what is on the machine at uninstall | Variable left behind (wine) | **static:** `-` rows carry the same value as their `=`/`+` counterpart, or no value | 8.13 |
+| Command-line value with an unbalanced quote in a documented install command | 1639 `ERROR_INVALID_COMMAND_LINE` (wine) | **static:** quote with doubled inner quotes, `P="""a"" b"`; test every documented command line | 8.7 |
 
 ### B.4 Sequences and custom actions
 
@@ -1554,6 +1705,8 @@ Every pitfall below has cost someone an install on a customer's machine. Each ro
 | `MsiServiceConfigFailureActions` with restart or reboot actions | Error 1939 and rollback | **static:** reject the table's restart and reboot actions; use the `sc.exe` recipe | 10.3, 17.3 |
 | Standard action names used for custom actions; dialogs in execute sequences | Action never runs; validation errors | **ICE93**, **ICE13** | 9.1 |
 | A custom action returning a value other than 0, 259, 1602 or 1603 | Treated as failure | **static:** EXE actions without Continue fail on any non-zero exit | 9.4 |
+| Immediate custom action sequenced after `InstallFiles` (or any script action) that reads what that action wrote | The file, folder, key or registration is not there yet: script actions run at `InstallFinalize` (wine) | **static:** an immediate action that names `[#File]`, `[$Component]` or an installed path must sit after `InstallFinalize`, or be deferred | 8.11 |
+| Condition with a syntax error relied on to stop the install | A `LaunchCondition` that does not parse is ignored (wine) | **static:** parse every `Condition` column with the grammar of 8.8 | 8.8, 9.1 |
 
 ### B.5 User interface
 
@@ -1696,6 +1849,8 @@ Start with `ENV-01`, `ENV-02`, `DB-01`, `CAB-01`, `RUN-01`, `RUST-06`, `RUST-08`
 **Mapping to the section 14 experiments:** W1 = `CFB-07`; W2 = `DB-08`/`SUM-03`; W3 = `DB-05`; W4 = `SUM-02`; W5 = `RUN-03`/`RUN-04`; W6 = `SIG-02`/`SIG-04`/`SIG-05`; W7 = `RUN-01`; W8 = `DB-07`; W9 = `CAB-01`/`CAB-03`; W10 = `CFB-03`/`DB-03`; W11 = `SUM-03`/`SUM-04`; W12 = `RUN-02`; W13 = `RUN-07`; W14 = `DB-14`/`SUM-04`; W15 = `CAB-09`/`CAB-10`; W16 = `RUN-08`; W17 = `RUN-13`; W18 = `RUN-16`.
 
 **Mapping to Appendix B:** every row of B.1 is covered by `CFB-*`, `DB-*` and `SUM-*`; B.2 by `CAB-*`; B.3 by `RUN-02`, `RUN-07`, `RUN-08`, `RUN-12`, `RUN-14`, `RUN-15`; B.4 by `RUN-05`, `RUN-09`, `RUN-13`, `RUN-17`, `RUN-18`; B.5 by `RUN-10` and `RUN-16`. A pitfall whose check is only **static** has no case here on purpose: it is caught before Windows runs.
+
+**Prior evidence from Wine's conformance tests (wine):** the results stay **Not run** because none of these runs was made for this document, but Wine's `dlls/msi/tests` already assert part of what several cases ask, on the Windows builds the Wine project tests on. `SUM-02` and `SUM-03`: `test_package_validation` (Template platform and language lists, Page Count 100 vs 200 for `x64`, section 4). `DB-04`: `test_longstrings` (a 0x10005-byte string round-trips). `DB-11`: `test_binary`, `test_streamtable` (stream naming, over-long name fails at commit). `DB-12`: `test_try_transform` (`_TransformView`). `CAB-05`, `CAB-06`: `test_continuouscabs`, `test_caborder`, `test_mixedmedia`, `test_missingcab` (media selection and cabinet naming, section 5). `RUN-02`: `test_readonlyfile`, `test_file_in_use` (3010 and pending renames). `RUN-03`: `test_find_related_products`, `test_remove_existing_products`. `RUN-05`: `test_install_services`, `test_start_stop_services`, `test_delete_services` (without the failure-actions table). `RUN-06`: `test_allusers_prop` (`ALLUSERS=2` reads as `1`). `RUN-07`: `test_mixed_package`, `test_wow64` (bit 256 picks the view under both templates). `RUN-08`: `test_envvar` (every flag combination of the case, with the uninstall of appended segments marked `todo_wine`). `RUN-09`: `test_propcase`, `test_command_line_parsing`. `RUN-18`: `test_deferred_action` and the return-code mapping of section 8.11 (259 itself untested there). A run of these cases should start by reproducing the Wine assertion, then extend it.
 
 ### Evidence guidelines and references
 
