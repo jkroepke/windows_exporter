@@ -57,6 +57,7 @@ type pkg struct {
 	Is64           bool
 	InstallDirName string
 	LongOnlyDir    bool // write DefaultDir without a short name part (invalid 8.3)
+	PerUser        bool // leave ALLUSERS out of the Property table
 	Files          []payload
 	Extra          map[string][][]string // extra rows per table
 	ExtraProps     [][]string
@@ -275,8 +276,10 @@ func (p *pkg) build(out string) error {
 		{"Manufacturer", "msitest"},
 		{"ProductLanguage", "1033"},
 		{"UpgradeCode", p.UpgradeCode},
-		{"ALLUSERS", "1"},
 	}, p.ExtraProps...)
+	if !p.PerUser {
+		tables["Property"] = append(tables["Property"], []string{"ALLUSERS", "1"})
+	}
 	tables["Directory"] = [][]string{
 		{"TARGETDIR", "", "SourceDir"},
 		{pf, "TARGETDIR", "."},
